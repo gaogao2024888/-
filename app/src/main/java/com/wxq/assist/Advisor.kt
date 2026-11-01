@@ -24,6 +24,38 @@ object Advisor {
     }
 
     fun currentBoard(): List<String> = board.toList()
+
+    fun isOnBoard(name: String): Boolean = board.contains(name)
+
+    /** 手动勾选上阵英雄。棋盘是 3D 模型没有文字，OCR 读不到，手选 100% 准确 */
+    fun toggleHero(name: String): Boolean {
+        val added = if (board.contains(name)) {
+            board.remove(name); false
+        } else {
+            board.add(name); true
+        }
+        Logger.i("Advisor", "${if (added) "上阵" else "下场"} $name，当前 ${board.size} 人")
+        return added
+    }
+
+    fun clearBoard() {
+        board.clear()
+        targetComp = null
+        Logger.i("Advisor", "已清空上阵阵容")
+    }
+
+    /**
+     * 不走 OCR，直接按当前已知阵容出建议。
+     * 手选完点一下就能看到阵营缺口和推荐阵容。
+     */
+    fun adviseFromBoard(): String {
+        if (board.isEmpty()) {
+            return "还没选上阵英雄。\n\n在上面的英雄列表里点选你场上的英雄，选完这里就会出建议。"
+        }
+        val sb = StringBuilder()
+        renderBoardAnalysis(sb)
+        return sb.toString()
+    }
     fun currentTarget(): String? = targetComp?.name
 
     // ================= 阵容 =================
@@ -37,12 +69,20 @@ object Advisor {
         board.clear()
         found.forEach { board.add(it.name) }
 
+        val sb = StringBuilder()
+        renderBoardAnalysis(sb)
+        appendLowConfidence(sb, found)
+        appendDataWarnings(sb, ocrText, found)
+        return sb.toString()
+    }
+
+    /** 阵容分析的正文。OCR 识别和手动选阵容共用这一段 */
+    private fun renderBoardAnalysis(sb: StringBuilder) {
         val heroes = board.mapNotNull { GameData.hero(it) }
         val campCount = heroes.groupingBy { it.camp }.eachCount()
             .filterKeys { it != "无阵营" }
             .toList().sortedByDescending { it.second }
 
-        val sb = StringBuilder()
         sb.append("【当前阵容】${heroes.size} 名\n")
         sb.append(heroes.joinToString("、") { "${it.name}(${it.quality}阶)" })
         sb.append("\n\n")
@@ -97,9 +137,6 @@ object Advisor {
             }
         }
 
-        appendLowConfidence(sb, found)
-        appendDataWarnings(sb, ocrText, found)
-        return sb.toString()
     }
 
     /** 返回 (阵容, 契合度, 缺的英雄) */

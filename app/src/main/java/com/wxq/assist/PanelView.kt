@@ -330,7 +330,10 @@ class PanelView(
         return root
     }
 
-    // ---------------- 阵容页（屏蔽名单） ----------------
+    // ---------------- 阵容页 ----------------
+
+    /** 阵容页的两个子页：手动选上阵 / 屏蔽名单 */
+    private var compsSubTab = 0
 
     private fun buildComps(): View {
         val root = UiKit.col(context)
@@ -339,6 +342,117 @@ class PanelView(
             root.addView(UiKit.label(context, "游戏数据还在加载…", 11f, UiKit.TEXT_DIM))
             return root
         }
+
+        val switcher = UiKit.row(context)
+        switcher.layoutParams = UiKit.wrapRow(UiKit.sdp(context, 28f))
+        listOf("我的上阵", "屏蔽阵容").forEachIndexed { i, label ->
+            val on = compsSubTab == i
+            val b = UiKit.button(context, label, active = on) {
+                compsSubTab = i
+                showTab(Tab.COMPS)
+            }
+            b.maxLines = 1
+            switcher.addView(b, UiKit.weight(1f).apply {
+                marginEnd = if (i == 0) UiKit.sdp(context, 4f) else 0
+            })
+        }
+        root.addView(switcher)
+        root.addView(UiKit.divider(context))
+
+        if (compsSubTab == 0) {
+            root.addView(buildBoardPicker(), LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        } else {
+            root.addView(buildBlockList(), LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        }
+        return root
+    }
+
+    /**
+     * 手动勾选上阵英雄。
+     * 棋盘上的棋子是 3D 模型没有文字，OCR 读不到；手选虽然土，但 100% 准确，
+     * 而且商店打分和天赋打分本来就只需要知道"场上有谁"。
+     */
+    private fun buildBoardPicker(): View {
+        val root = UiKit.col(context)
+
+        val bar = UiKit.row(context)
+        bar.layoutParams = UiKit.wrapRow(UiKit.sdp(context, 30f))
+        val cnt = UiKit.label(
+            context, "已选 ${Advisor.currentBoard().size} 人", 11f, UiKit.ACCENT
+        ).apply { maxLines = 1 }
+        bar.addView(cnt, LinearLayout.LayoutParams(0, LayoutParams.MATCH_PARENT, 1f))
+        bar.addView(
+            UiKit.button(context, "出建议") {
+                setAdvice(Advisor.adviseFromBoard())
+                showTab(Tab.ADVICE)
+            },
+            LinearLayout.LayoutParams(
+                UiKit.sdp(context, 54f), LayoutParams.MATCH_PARENT
+            ).apply { marginEnd = UiKit.sdp(context, 4f) }
+        )
+        bar.addView(
+            UiKit.button(context, "清空") {
+                Advisor.clearBoard()
+                showTab(Tab.COMPS)
+            },
+            LinearLayout.LayoutParams(UiKit.sdp(context, 44f), LayoutParams.MATCH_PARENT)
+        )
+        root.addView(bar)
+
+        val scroll = ScrollView(context)
+        val list = UiKit.col(context)
+
+        // 按阵营分组，凑羁绊时一眼能看出同阵营还差谁
+        GameData.heroes.groupBy { it.camp }.toList()
+            .sortedBy { it.first }
+            .forEach { (camp, heroes) ->
+                val picked = heroes.count { Advisor.isOnBoard(it.name) }
+                val head = UiKit.label(
+                    context,
+                    "$camp  ($picked/${heroes.size})",
+                    10.5f,
+                    if (picked > 0) UiKit.ACCENT else UiKit.TEXT_DIM
+                ).apply { maxLines = 1 }
+                list.addView(head, UiKit.wrapRow().apply {
+                    topMargin = UiKit.sdp(context, 5f)
+                    bottomMargin = UiKit.sdp(context, 2f)
+                })
+
+                // 每行 4 个，横屏下刚好
+                heroes.sortedBy { it.name }.chunked(4).forEach { chunk ->
+                    val row = UiKit.row(context)
+                    row.layoutParams = UiKit.wrapRow(UiKit.sdp(context, 28f)).apply {
+                        bottomMargin = UiKit.sdp(context, 3f)
+                    }
+                    chunk.forEach { h ->
+                        val on = Advisor.isOnBoard(h.name)
+                        val b = UiKit.button(context, "${h.name}·${h.quality}", active = on)
+                        b.maxLines = 1
+                        b.setOnClickListener {
+                            Advisor.toggleHero(h.name)
+                            showTab(Tab.COMPS)
+                        }
+                        row.addView(b, UiKit.weight(1f).apply {
+                            marginEnd = UiKit.sdp(context, 3f)
+                        })
+                    }
+                    // 补齐空位，保证最后一行按钮宽度和上面一致
+                    repeat(4 - chunk.size) {
+                        row.addView(View(context), UiKit.weight(1f).apply {
+                            marginEnd = UiKit.sdp(context, 3f)
+                        })
+                    }
+                    list.addView(row)
+                }
+            }
+
+        scroll.addView(list)
+        root.addView(scroll, LayoutParams(LayoutParams.MATCH_PARENT, 0, 1f))
+        return root
+    }
+
+    private fun buildBlockList(): View {
+        val root = UiKit.col(context)
 
         val head = UiKit.row(context)
         head.layoutParams = UiKit.wrapRow(UiKit.sdp(context, 28f))

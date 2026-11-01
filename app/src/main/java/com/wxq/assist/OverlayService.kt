@@ -44,10 +44,13 @@ class OverlayService : Service(), PanelView.Host {
     private var handleView: View? = null
     private var panelView: PanelView? = null
     private var guideView: RegionGuideView? = null
+    private var calibDoneView: View? = null
+    private var gripView: View? = null
 
     private var ballParams: WindowManager.LayoutParams? = null
     private var handleParams: WindowManager.LayoutParams? = null
     private var panelParams: WindowManager.LayoutParams? = null
+    private var gripParams: WindowManager.LayoutParams? = null
 
     private var capture: ScreenCapture? = null
     private val worker = java.util.concurrent.Executors.newSingleThreadExecutor()
@@ -127,6 +130,8 @@ class OverlayService : Service(), PanelView.Host {
         removeView(handleView); handleView = null
         removeView(panelView); panelView = null
         removeView(guideView); guideView = null
+        removeView(calibDoneView); calibDoneView = null
+        removeView(gripView); gripView = null
         Logger.i("Service", "悬浮窗服务已停止")
         super.onDestroy()
     }
@@ -352,19 +357,107 @@ class OverlayService : Service(), PanelView.Host {
         panelView = pv
 
         // 整个面板可拖；按在滑块/按钮上时交给子控件处理
-        attachDrag(pv, p, dragThresholdDp = 10f, onTap = null, onMoved = { x, y ->
-            Prefs.panelX = x.toFloat() / screenW()
-            Prefs.panelY = y.toFloat() / screenH()
-        })
+        attachDrag(
+            pv, p, dragThresholdDp = 10f, onTap = null,
+            onMoving = { positionGrip() },
+            onMoved = { x, y ->
+                Prefs.panelX = x.toFloat() / screenW()
+                Prefs.panelY = y.toFloat() / screenH()
+            }
+        )
 
         runCatching { wm.addView(pv, p) }
             .onFailure { Logger.e("Overlay", "添加面板失败", it) }
+
+        showResizeGrip()
+    }
+
+    /**
+     * 右下角的缩放手柄。直接拖就能改面板大小，不用再去设置里拉滑块。
+     * 做成独立窗口是因为面板本身要响应内部控件的触摸，混在一起容易打架。
+     */
+    private fun showResizeGrip() {
+        removeView(gripView)
+        val size = UiKit.sdp(this, 30f)
+
+        val grip = FrameLayout(this).apply {
+            background = UiKit.rounded(0xCC3B82F6.toInt(), size / 2f)
+            alpha = Prefs.opacity
+            addView(
+                UiKit.label(this@OverlayService, "⇲", 15f, 0xFFFFFFFF.toInt()).apply {
+                    gravity = Gravity.CENTER
+                    maxLines = 1
+                },
+                FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT
+                )
+            )
+        }
+
+        val gp = baseParams(size, size)
+        gripParams = gp
+        gripView = grip
+        positionGrip()
+
+        var downX = 0f
+        var downY = 0f
+        var startW = 0
+        var startH = 0
+
+        grip.setOnTouchListener { _, ev ->
+            val pp = panelParams ?: return@setOnTouchListener false
+            when (ev.actionMasked) {
+                MotionEvent.ACTION_DOWN -> {
+                    downX = ev.rawX; downY = ev.rawY
+                    startW = pp.width; startH = pp.height
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    val minW = UiKit.dp(this, 170f)
+                    val minH = UiKit.dp(this, 150f)
+                    pp.width = (startW + (ev.rawX - downX)).toInt()
+                        .coerceIn(minW, screenW())
+                    pp.height = (startH + (ev.rawY - downY)).toInt()
+                        .coerceIn(minH, screenH())
+                    panelView?.let { v -> runCatching { wm.updateViewLayout(v, pp) } }
+                    positionGrip()
+                    true
+                }
+                MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> {
+                    // 存成比例，横竖屏切换后还能还原
+                    Prefs.widthRatio = pp.width.toFloat() / screenW()
+                    Prefs.heightRatio = pp.height.toFloat() / screenH()
+                    Logger.d(
+                        "Overlay",
+                        "面板尺寸 ${pp.width}x${pp.height} " +
+                            "(%.2f/%.2f)".format(Prefs.widthRatio, Prefs.heightRatio)
+                    )
+                    true
+                }
+                else -> false
+            }
+        }
+
+        runCatching { wm.addView(grip, gp) }
+            .onFailure { Logger.e("Overlay", "添加缩放手柄失败", it) }
+    }
+
+    /** 把手柄钉在面板右下角 */
+    private fun positionGrip() {
+        val pp = panelParams ?: return
+        val gp = gripParams ?: return
+        val g = gripView ?: return
+        gp.x = pp.x + pp.width - gp.width / 2
+        gp.y = pp.y + pp.height - gp.height / 2
+        runCatching { wm.updateViewLayout(g, gp) }
     }
 
     override fun onCollapse() {
         // 只收面板，服务、悬浮球、把手都留着
         removeView(panelView)
         panelView = null
+        removeView(gripView); gripView = null
         if (calibrating) onToggleCalibrate(false)
         Logger.d("Overlay", "面板已收起（助手仍在后台运行）")
     }
@@ -377,6 +470,7 @@ class OverlayService : Service(), PanelView.Host {
         handler.post {
             val wasOpen = panelView != null
             removeView(panelView); panelView = null
+            removeView(gripView); gripView = null
             showBall()
             showHandle()
             if (wasOpen) showPanel()
@@ -388,6 +482,7 @@ class OverlayService : Service(), PanelView.Host {
         showHandle()
         if (panelView != null) {
             removeView(panelView); panelView = null
+            removeView(gripView); gripView = null
             showPanel()
         }
         if (calibrating) {
@@ -403,6 +498,7 @@ class OverlayService : Service(), PanelView.Host {
         params: WindowManager.LayoutParams,
         dragThresholdDp: Float = 6f,
         onTap: (() -> Unit)?,
+        onMoving: (() -> Unit)? = null,
         onMoved: (Int, Int) -> Unit
     ) {
         val threshold = UiKit.dp(this, dragThresholdDp)
@@ -432,6 +528,7 @@ class OverlayService : Service(), PanelView.Host {
                         params.y = (startY + dy).toInt()
                             .coerceIn(0, maxOf(0, screenH() - v.height / 3))
                         runCatching { wm.updateViewLayout(v, params) }
+                        onMoving?.invoke()
                         true
                     } else false
                 }
@@ -451,16 +548,29 @@ class OverlayService : Service(), PanelView.Host {
 
     // ---------------- 区域校准 ----------------
 
+    private var panelWasOpenBeforeCalibrate = false
+
     override fun onToggleCalibrate(on: Boolean) {
         calibrating = on
         if (!on) {
-            removeView(guideView)
-            guideView = null
+            removeView(guideView); guideView = null
+            removeView(calibDoneView); calibDoneView = null
             Logger.i("Region", "已退出区域校准")
+            // 校准前面板是开着的话，完成后自动弹回来
+            if (panelWasOpenBeforeCalibrate && panelView == null) {
+                panelWasOpenBeforeCalibrate = false
+                showPanel()
+            }
             return
         }
 
+        // 校准层是全屏的，面板留在下面既点不到又碍眼，先收起
+        panelWasOpenBeforeCalibrate = panelView != null
+        removeView(panelView); panelView = null
+        removeView(gripView); gripView = null
         removeView(guideView)
+        removeView(calibDoneView)
+
         val gv = RegionGuideView(this).apply {
             editable = true
             onRegionChanged = { name, _ -> Logger.d("Region", "$name 区域已更新") }
@@ -473,7 +583,27 @@ class OverlayService : Service(), PanelView.Host {
         )
         runCatching { wm.addView(gv, p) }
             .onFailure { Logger.e("Overlay", "添加校准层失败", it) }
-        Logger.i("Region", "进入区域校准：拖动方框或四角调整，松手自动保存")
+
+        // 校准层是全屏的，会盖住面板，所以必须单独放一个完成按钮在它上面，
+        // 否则用户调完了没地方点确认。
+        val done = UiKit.button(this, "✓ 完成校准") {
+            onToggleCalibrate(false)
+        }.apply {
+            maxLines = 1
+            val radius = UiKit.sdp(this@OverlayService, 18f).toFloat()
+            background = UiKit.ripple(UiKit.rounded(0xF04ADE80.toInt(), radius))
+            setTextColor(0xFF0E1116.toInt())
+            maxTextSp = UiKit.ssp(14f)
+        }
+        val dp = baseParams(UiKit.sdp(this, 112f), UiKit.sdp(this, 38f)).apply {
+            x = (screenW() - UiKit.sdp(this@OverlayService, 112f)) / 2
+            y = UiKit.sdp(this@OverlayService, 10f)
+        }
+        calibDoneView = done
+        runCatching { wm.addView(done, dp) }
+            .onFailure { Logger.e("Overlay", "添加完成按钮失败", it) }
+
+        Logger.i("Region", "进入区域校准：拖动方框或四角调整，松手自动保存；点顶部「完成校准」退出")
     }
 
     override fun isCalibrating(): Boolean = calibrating

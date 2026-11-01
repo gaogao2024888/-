@@ -40,7 +40,12 @@ class PanelView(
 
     private enum class Tab { ADVICE, RECOGNIZE, COMPS, LOG, SETTINGS }
 
-    private var current = Tab.ADVICE
+    companion object {
+        /** 改设置会重建面板，用它记住当前停在哪一页，别每次都跳回「建议」 */
+        private var lastTab = Tab.ADVICE
+    }
+
+    private var current = lastTab
     private val content = FrameLayout(ctx)
     private val tabButtons = mutableMapOf<Tab, AutoFitTextView>()
 
@@ -51,6 +56,11 @@ class PanelView(
 
     private val logListener: () -> Unit = {
         post { if (current == Tab.LOG) refreshLog() else updateLogBadge() }
+    }
+
+    /** 外部结束校准后，刷新「识别」页那个按钮的文字和高亮 */
+    fun refreshCalibrateButton() {
+        post { if (current == Tab.RECOGNIZE) showTab(Tab.RECOGNIZE) }
     }
 
     init {
@@ -151,6 +161,7 @@ class PanelView(
 
     private fun showTab(t: Tab) {
         current = t
+        lastTab = t
         val radius = Prefs.cornerDp * resources.displayMetrics.density * 0.6f
         tabButtons.forEach { (k, v) ->
             val on = k == t
@@ -308,11 +319,12 @@ class PanelView(
 
         val tip = UiKit.label(
             context,
-            "三个按钮各自只截对应区域，所以在商店页面点「识别当前阵容」不会把商店的牌算进去。\n" +
-                "黄色加粗虚线是阵容区的下边界，也就是阵容和商店的分界线。",
+            "三个按钮各自只截对应区域，在商店页面点「识别当前阵容」不会把商店的牌算进去。\n" +
+                "校准时面板会自动收起，调完点屏幕顶部绿色的「✓ 完成校准」即可，面板会自动回来。\n" +
+                "黄色=阵容区，绿色=商店区，蓝色=天赋区；拖方框移动，拖四角改大小，松手即保存。",
             10f, UiKit.TEXT_DIM
         )
-        tip.maxLines = 6
+        tip.maxLines = 8
         root.addView(tip, UiKit.wrapRow().apply { topMargin = UiKit.sdp(context, 6f) })
 
         return root
@@ -533,10 +545,11 @@ class PanelView(
 
         val note = UiKit.label(
             context,
-            "提示：标题栏的 ✕ 只收起面板，助手仍在后台；要完全关掉请用这里的「退出助手」。",
+            "面板右下角有个蓝色圆点，直接拖它就能改大小，不用来这里拉滑块。\n" +
+                "标题栏的 ✕ 只收起面板，助手仍在后台；要完全关掉用上面的「退出助手」。",
             10f, UiKit.TEXT_DIM
         )
-        note.maxLines = 4
+        note.maxLines = 5
         root.addView(note, UiKit.wrapRow().apply { topMargin = UiKit.sdp(context, 6f) })
 
         scroll.addView(root)

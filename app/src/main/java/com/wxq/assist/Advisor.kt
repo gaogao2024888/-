@@ -146,9 +146,16 @@ object Advisor {
             var score = 0
             val reasons = mutableListOf<String>()
 
-            targetComp?.let { t ->
-                if (t.core.contains(h.name)) { score += 50; reasons.add("目标阵容核心") }
-                else if (t.heroes.contains(h.name)) { score += 25; reasons.add("目标阵容成员") }
+            val tc = targetComp
+            if (tc != null) {
+                when {
+                    tc.core.contains(h.name) -> {
+                        score += 50; reasons.add("目标阵容核心")
+                    }
+                    tc.heroes.contains(h.name) -> {
+                        score += 25; reasons.add("目标阵容成员")
+                    }
+                }
             }
 
             if (board.contains(h.name)) {

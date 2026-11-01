@@ -15,13 +15,26 @@ android {
         versionName = "0.1.0"
     }
 
+    // 固定签名。用 Gradle 自动生成的 debug.keystore 的话，CI 每次构建都会
+    // 新造一把密钥，签名一变 Android 就当成另一个应用，只能卸载重装，
+    // 设置和校准数据全丢。固定下来才能覆盖安装保留数据。
+    signingConfigs {
+        create("stable") {
+            storeFile = rootProject.file("keystore/debug.keystore")
+            storePassword = "wxqassist"
+            keyAlias = "wxqassist"
+            keyPassword = "wxqassist"
+        }
+    }
+
     buildTypes {
         debug {
             isMinifyEnabled = false
+            signingConfig = signingConfigs.getByName("stable")
         }
         release {
             isMinifyEnabled = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName("stable")
         }
     }
 

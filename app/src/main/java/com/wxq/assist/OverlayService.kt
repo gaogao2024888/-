@@ -674,6 +674,27 @@ class OverlayService : Service(), PanelView.Host {
             else -> calibTarget
         }
         Logger.i("Region", "校准中：当前编辑【$cn】区，其他区域已隐藏避免误拖")
+        warnOverlap()
+    }
+
+    /**
+     * 三个区域互相重叠就等于没分区 —— 在商店页点「识别阵容」照样会把商店的牌读进去。
+     * 这是设计这套区域的全部意义，重叠了必须提醒。
+     */
+    private fun warnOverlap() {
+        val b = Prefs.region(Prefs.REGION_BOARD)
+        val s = Prefs.region(Prefs.REGION_SHOP)
+        val t = Prefs.region(Prefs.REGION_TALENT)
+        listOf(
+            Triple("阵容", "商店", Prefs.overlapRatio(b, s)),
+            Triple("阵容", "天赋", Prefs.overlapRatio(b, t)),
+            Triple("商店", "天赋", Prefs.overlapRatio(s, t))
+        ).filter { it.third > 0.30f }.forEach { (x, y, r) ->
+            Logger.w(
+                "Region",
+                "⚠ 【$x】和【$y】重叠 ${(r * 100).toInt()}%，分区会失效，建议错开"
+            )
+        }
     }
 
     /** 当前正在校准哪个区域 */

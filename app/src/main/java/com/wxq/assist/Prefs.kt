@@ -113,11 +113,23 @@ object Prefs {
             .apply()
     }
 
+    // 默认值取自 2026-11-01 在一加 Ace2 Pro (2772x1240) 上的实测校准结果。
+    // 「恢复默认」会回到这一组，不用每次重新拖。
     private fun defaultRegion(name: String): RectF = when (name) {
-        REGION_BOARD -> RectF(0.18f, 0.10f, 0.82f, 0.62f)   // 棋盘/阵容区
-        REGION_SHOP -> RectF(0.14f, 0.70f, 0.86f, 0.96f)    // 商店区
-        REGION_TALENT -> RectF(0.20f, 0.22f, 0.80f, 0.78f)  // 天赋三选一弹窗
+        REGION_BOARD -> RectF(0.249f, 0.405f, 0.759f, 0.799f)
+        REGION_SHOP -> RectF(0.073f, 0.074f, 0.792f, 0.614f)
+        REGION_TALENT -> RectF(0.230f, 0.180f, 0.775f, 0.714f)
         else -> RectF(0.2f, 0.2f, 0.8f, 0.8f)
+    }
+
+    /** 两个区域的重叠面积占较小者的比例，用来提醒分区是否失效 */
+    fun overlapRatio(a: RectF, b: RectF): Float {
+        val w = minOf(a.right, b.right) - maxOf(a.left, b.left)
+        val h = minOf(a.bottom, b.bottom) - maxOf(a.top, b.top)
+        if (w <= 0f || h <= 0f) return 0f
+        val inter = w * h
+        val smaller = minOf(a.width() * a.height(), b.width() * b.height())
+        return if (smaller <= 0f) 0f else inter / smaller
     }
 
     const val REGION_BOARD = "board"

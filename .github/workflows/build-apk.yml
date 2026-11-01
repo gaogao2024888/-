@@ -5,6 +5,9 @@ on:
     branches: [ main, master ]
   workflow_dispatch:        # 允许在网页上手动点一下就构建
 
+permissions:
+  contents: write        # 发 Release 需要写权限
+
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -30,9 +33,31 @@ jobs:
       - name: 编译 Debug APK
         run: gradle assembleDebug --no-daemon --stacktrace
 
-      - name: 上传 APK
+      - name: 上传 APK（需登录才能下载）
         uses: actions/upload-artifact@v4
         with:
           name: wxq-assist-debug-apk
           path: app/build/outputs/apk/debug/*.apk
           if-no-files-found: error
+
+      # Release 附件不需要登录即可下载，链接也固定，手机上方便得多
+      - name: 重命名 APK
+        run: |
+          mkdir -p release
+          cp app/build/outputs/apk/debug/app-debug.apk release/wxq-assist.apk
+          ls -lh release/
+
+      - name: 发布 Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: 最新构建
+          body: |
+            万象棋助手 Debug 版，自动构建。
+
+            直接点下面的 `wxq-assist.apk` 下载安装，**不需要登录 GitHub**。
+            安装时需在系统里允许「安装未知来源应用」。
+
+            提交: ${{ github.sha }}
+          files: release/wxq-assist.apk
+          make_latest: true

@@ -48,13 +48,15 @@ class ScreenCapture(private val ctx: Context) {
     fun start(resultCode: Int, resultData: Intent): Boolean {
         return try {
             release()
+            Logger.d("Capture", "开始建立截屏通道 resultCode=$resultCode")
 
             val mgr = ctx.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             val p = mgr.getMediaProjection(resultCode, resultData)
             if (p == null) {
-                Logger.e("Capture", "getMediaProjection 返回 null，授权可能已失效")
+                Logger.e("Capture", "getMediaProjection 返回 null，授权可能已失效或已被用过一次")
                 return false
             }
+            Logger.d("Capture", "getMediaProjection 成功")
 
             // Android 14 起必须先注册 Callback 再创建 VirtualDisplay
             p.registerCallback(projectionCallback, handler)

@@ -20,6 +20,7 @@ import android.view.MotionEvent
 import android.view.View
 import android.view.WindowManager
 import android.widget.FrameLayout
+import android.widget.LinearLayout
 import androidx.core.app.ServiceCompat
 import kotlin.math.abs
 
@@ -100,16 +101,21 @@ class OverlayService : Service(), PanelView.Host {
                         intent.getParcelableExtra(EXTRA_RESULT_DATA, Intent::class.java)
                     else @Suppress("DEPRECATION") intent.getParcelableExtra(EXTRA_RESULT_DATA)
 
+                Logger.i("Service", "收到授权回传: code=$code data=${if (data == null) "null" else "有"}")
                 if (data != null) {
-                    // Android 14+ 要求先把前台服务切到 mediaProjection 类型
-                    startAsForeground(mediaProjection = true)
+                    // Android 14+ 要求先把前台服务切到 mediaProjection 类型，
+                    // 这一步没成功的话 getMediaProjection 必定抛 SecurityException
+                    val fgOk = startAsForeground(mediaProjection = true)
+                    Logger.i("Service", "切换前台服务类型为 mediaProjection: ${if (fgOk) "成功" else "失败"}")
                     projectionReady = capture?.start(code, data) == true
                     panelView?.updateStatus()
                     if (projectionReady) {
-                        Logger.i("Service", "识别功能已就绪")
+                        Logger.i("Service", "✅ 识别功能已就绪")
                     } else {
-                        Logger.e("Service", "截屏通道建立失败，详见上方日志")
+                        Logger.e("Service", "❌ 截屏通道建立失败，详见上方日志")
                     }
+                } else {
+                    Logger.e("Service", "授权回传里没有 data，无法建立通道")
                 }
             }
 
@@ -152,7 +158,7 @@ class OverlayService : Service(), PanelView.Host {
 
     // ---------------- 前台通知 ----------------
 
-    private fun startAsForeground(mediaProjection: Boolean) {
+    private fun startAsForeground(mediaProjection: Boolean): Boolean {
         val nm = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26 && nm.getNotificationChannel(CHANNEL) == null) {
             nm.createNotificationChannel(
@@ -184,11 +190,15 @@ class OverlayService : Service(), PanelView.Host {
         else
             ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
 
-        try {
+        return try {
             ServiceCompat.startForeground(this, NOTIF_ID, notif, type)
+            true
         } catch (t: Throwable) {
             Logger.e("Service", "startForeground 失败(type=$type)", t)
+            // 退回无类型。注意：这种情况下 getMediaProjection 一定会被系统拒绝
             runCatching { ServiceCompat.startForeground(this, NOTIF_ID, notif, 0) }
+                .onFailure { Logger.e("Service", "降级 startForeground 也失败", it) }
+            false
         }
     }
 
@@ -551,6 +561,7 @@ class OverlayService : Service(), PanelView.Host {
     private var panelWasOpenBeforeCalibrate = false
 
     override fun onToggleCalibrate(on: Boolean) {
+        val wasCalibrating = calibrating
         calibrating = on
         if (!on) {
             removeView(guideView); guideView = null
@@ -564,8 +575,11 @@ class OverlayService : Service(), PanelView.Host {
             return
         }
 
-        // 校准层是全屏的，面板留在下面既点不到又碍眼，先收起
-        panelWasOpenBeforeCalibrate = panelView != null
+        // 校准层是全屏的，面板留在下面既点不到又碍眼，先收起。
+        // 切换区域时会重入本函数，那时面板早已收起，不能把状态冲掉。
+        if (!wasCalibrating) {
+            panelWasOpenBeforeCalibrate = panelView != null
+        }
         removeView(panelView); panelView = null
         removeView(gripView); gripView = null
         removeView(guideView)
@@ -584,37 +598,88 @@ class OverlayService : Service(), PanelView.Host {
         runCatching { wm.addView(gv, p) }
             .onFailure { Logger.e("Overlay", "添加校准层失败", it) }
 
-        // 校准层是全屏的，会盖住面板，所以必须单独放一个完成按钮在它上面，
-        // 否则用户调完了没地方点确认。
-        val done = UiKit.button(this, "✓ 完成校准") {
-            onToggleCalibrate(false)
-        }.apply {
-            maxLines = 1
-            val radius = UiKit.sdp(this@OverlayService, 18f).toFloat()
-            background = UiKit.ripple(UiKit.rounded(0xF04ADE80.toInt(), radius))
-            setTextColor(0xFF0E1116.toInt())
-            maxTextSp = UiKit.ssp(14f)
-        }
-        val dp = baseParams(UiKit.sdp(this, 112f), UiKit.sdp(this, 38f)).apply {
-            x = (screenW() - UiKit.sdp(this@OverlayService, 112f)) / 2
-            y = UiKit.sdp(this@OverlayService, 10f)
-        }
-        calibDoneView = done
-        runCatching { wm.addView(done, dp) }
-            .onFailure { Logger.e("Overlay", "添加完成按钮失败", it) }
+        // 一次只编辑一个区域。三个框同时可拖的话，想调这个会抓到那个，
+        // 结果就是三个框叠在一起，分区彻底失效。
+        gv.focusRegion = calibTarget
 
-        Logger.i("Region", "进入区域校准：拖动方框或四角调整，松手自动保存；点顶部「完成校准」退出")
+        // 校准层是全屏的，会盖住面板，所以工具条必须单独开一个窗口放在它上面。
+        val bar = UiKit.row(this).apply {
+            val radius = UiKit.sdp(this@OverlayService, 10f).toFloat()
+            background = UiKit.rounded(0xF2151A23.toInt(), radius)
+            val pad = UiKit.sdp(this@OverlayService, 4f)
+            setPadding(pad, pad, pad, pad)
+        }
+
+        fun tab(region: String, label: String, color: Int) {
+            val on = calibTarget == region
+            val b = UiKit.button(this, label, active = on) {
+                calibTarget = region
+                onToggleCalibrate(true)   // 重建工具条与焦点
+            }.apply {
+                maxLines = 1
+                val r = UiKit.sdp(this@OverlayService, 8f).toFloat()
+                background = UiKit.ripple(UiKit.rounded(if (on) color else UiKit.BG_BTN, r))
+                setTextColor(if (on) 0xFF0E1116.toInt() else UiKit.TEXT_MAIN)
+            }
+            bar.addView(
+                b,
+                LinearLayout.LayoutParams(
+                    UiKit.sdp(this@OverlayService, 58f),
+                    UiKit.sdp(this@OverlayService, 34f)
+                ).apply { marginEnd = UiKit.sdp(this@OverlayService, 4f) }
+            )
+        }
+
+        tab(Prefs.REGION_BOARD, "阵容", 0xFFFFC94A.toInt())
+        tab(Prefs.REGION_SHOP, "商店", 0xFF4ADE80.toInt())
+        tab(Prefs.REGION_TALENT, "天赋", 0xFF60A5FA.toInt())
+
+        val done = UiKit.button(this, "✓ 完成") { onToggleCalibrate(false) }.apply {
+            maxLines = 1
+            val r = UiKit.sdp(this@OverlayService, 8f).toFloat()
+            background = UiKit.ripple(UiKit.rounded(0xFF3B82F6.toInt(), r))
+            setTextColor(0xFFFFFFFF.toInt())
+        }
+        bar.addView(
+            done,
+            LinearLayout.LayoutParams(
+                UiKit.sdp(this, 62f), UiKit.sdp(this, 34f)
+            )
+        )
+
+        val barW = UiKit.sdp(this, 252f)
+        val dp = baseParams(barW, UiKit.sdp(this, 44f)).apply {
+            x = (screenW() - barW) / 2
+            y = UiKit.sdp(this@OverlayService, 8f)
+        }
+        calibDoneView = bar
+        runCatching { wm.addView(bar, dp) }
+            .onFailure { Logger.e("Overlay", "添加校准工具条失败", it) }
+
+        val cn = when (calibTarget) {
+            Prefs.REGION_BOARD -> "阵容"
+            Prefs.REGION_SHOP -> "商店"
+            Prefs.REGION_TALENT -> "天赋"
+            else -> calibTarget
+        }
+        Logger.i("Region", "校准中：当前编辑【$cn】区，其他区域已隐藏避免误拖")
     }
+
+    /** 当前正在校准哪个区域 */
+    private var calibTarget: String = Prefs.REGION_BOARD
 
     override fun isCalibrating(): Boolean = calibrating
 
     // ---------------- 识别 ----------------
 
     override fun onRequestProjection() {
-        startActivity(
-            Intent(this, ProjectionRequestActivity::class.java)
-                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-        )
+        Logger.i("Service", "请求截屏授权，拉起中转页")
+        runCatching {
+            startActivity(
+                Intent(this, ProjectionRequestActivity::class.java)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+            )
+        }.onFailure { Logger.e("Service", "拉起授权页失败", it) }
     }
 
     override fun isProjectionReady(): Boolean = projectionReady
@@ -626,8 +691,10 @@ class OverlayService : Service(), PanelView.Host {
     private fun doRecognize(region: String, silent: Boolean) {
         if (!projectionReady) {
             if (!silent) {
-                Logger.w("Recognize", "尚未授权截屏，请先在「识别」页点授权")
-                panelView?.setAdvice("⚠ 还没授权截屏。\n请到「识别」页点「① 授权截屏权限」。")
+                // 别让用户自己去找按钮，直接把系统授权框拉起来
+                Logger.w("Recognize", "尚未授权截屏，自动拉起授权流程")
+                panelView?.setAdvice("还没授权截屏，正在弹出系统授权框…\n\n选「整个屏幕」并确认，然后再点一次识别。")
+                onRequestProjection()
             }
             return
         }

@@ -18,9 +18,12 @@ class ProjectionRequestActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Logger.init(applicationContext)
+        Logger.i("Projection", "授权中转页启动 (savedState=${savedInstanceState != null})")
         try {
             val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
             startActivityForResult(mgr.createScreenCaptureIntent(), REQ)
+            Logger.i("Projection", "已弹出系统截屏授权对话框")
         } catch (t: Throwable) {
             Logger.e("Projection", "无法弹出截屏授权对话框", t)
             finish()
@@ -30,12 +33,18 @@ class ProjectionRequestActivity : Activity() {
     @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
+        Logger.i(
+            "Projection",
+            "授权对话框返回: requestCode=$requestCode resultCode=$resultCode " +
+                "(RESULT_OK=${RESULT_OK}) data=${if (data == null) "null" else "有"}"
+        )
+
         if (requestCode != REQ) {
             finish(); return
         }
 
         if (resultCode == RESULT_OK && data != null) {
-            Logger.i("Projection", "用户已授予截屏权限")
+            Logger.i("Projection", "用户已授予截屏权限，回传给服务")
             startService(
                 Intent(this, OverlayService::class.java).apply {
                     action = OverlayService.ACTION_PROJECTION_GRANTED

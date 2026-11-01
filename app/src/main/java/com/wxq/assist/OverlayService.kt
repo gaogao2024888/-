@@ -78,7 +78,18 @@ class OverlayService : Service(), PanelView.Host {
         Prefs.init(this)
         Logger.init(this)
         wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        capture = ScreenCapture(this)
+        capture = ScreenCapture(this).apply {
+            onProjectionLost = {
+                handler.post {
+                    projectionReady = false
+                    liveOn = false
+                    handler.removeCallbacks(liveTask)
+                    panelView?.updateStatus()
+                    panelView?.setAdvice("⚠ 截屏权限已失效，需要重新授权。\n\n点任意识别按钮会自动重新弹出授权框。")
+                    Logger.w("Service", "截屏权限失效，已停用识别功能，等待重新授权")
+                }
+            }
+        }
         worker.execute { GameData.load(applicationContext) }
         startAsForeground(mediaProjection = false)
         showBall()

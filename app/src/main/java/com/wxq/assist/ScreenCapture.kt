@@ -37,10 +37,14 @@ class ScreenCapture(private val ctx: Context) {
 
     val isReady: Boolean get() = projection != null && imageReader != null
 
+    /** 权限失效时回调，让服务更新状态并提示用户重新授权 */
+    var onProjectionLost: (() -> Unit)? = null
+
     private val projectionCallback = object : MediaProjection.Callback() {
         override fun onStop() {
-            Logger.w("Capture", "截屏权限被系统或用户回收")
+            Logger.w("Capture", "截屏权限已失效（投屏被停止或令牌作废）")
             release()
+            onProjectionLost?.invoke()
         }
     }
 
@@ -85,29 +89,42 @@ class ScreenCapture(private val ctx: Context) {
         }
     }
 
-    /** 屏幕旋转后分辨率变了，需要重建 VirtualDisplay */
+    /**
+     * 屏幕旋转后分辨率变了。
+     *
+     * 注意：Android 14+ 禁止在同一个 MediaProjection 上第二次调用 createVirtualDisplay，
+     * 否则抛 SecurityException 并直接作废整个授权（"Don't take multiple captures by
+     * invoking MediaProjection#createVirtualDisplay multiple times on the same instance"）。
+     * 所以这里必须用 resize + setSurface 原地改，绝不能重建。
+     */
     fun onConfigChanged() {
-        val p = projection ?: return
+        val vd = virtualDisplay ?: return
+        if (projection == null) return
+
         val metrics = currentMetrics()
         if (metrics.widthPixels == capW && metrics.heightPixels == capH) return
 
-        Logger.i("Capture", "分辨率变化 ${capW}x$capH -> ${metrics.widthPixels}x${metrics.heightPixels}，重建通道")
+        Logger.i(
+            "Capture",
+            "分辨率变化 ${capW}x$capH -> ${metrics.widthPixels}x${metrics.heightPixels}，原地调整"
+        )
         try {
-            virtualDisplay?.release()
-            imageReader?.close()
+            val oldReader = imageReader
 
             capW = metrics.widthPixels
             capH = metrics.heightPixels
             dpi = metrics.densityDpi
 
-            imageReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
-            virtualDisplay = p.createVirtualDisplay(
-                "WxqCapture", capW, capH, dpi,
-                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-                imageReader!!.surface, null, handler
-            )
+            val newReader = ImageReader.newInstance(capW, capH, PixelFormat.RGBA_8888, 2)
+            // 顺序要紧：先改尺寸，再换 Surface，最后才关旧的
+            vd.resize(capW, capH, dpi)
+            vd.surface = newReader.surface
+            imageReader = newReader
+            runCatching { oldReader?.close() }
+
+            Logger.i("Capture", "通道已适配新分辨率 ${capW}x$capH")
         } catch (t: Throwable) {
-            Logger.e("Capture", "重建截屏通道失败", t)
+            Logger.e("Capture", "调整截屏通道失败", t)
         }
     }
 

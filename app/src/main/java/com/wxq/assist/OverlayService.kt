@@ -747,11 +747,22 @@ class OverlayService : Service(), PanelView.Host {
         if (!silent) panelView?.setAdvice("正在识别$name…")
 
         worker.execute {
+            // MediaProjection 拍的是整块屏幕，我们自己的悬浮窗也会被拍进去。
+            // 面板压在识别区上时，OCR 读到的就是面板本身，不是游戏画面。
+            val needHide = overlaysOverlap(rect)
             try {
+                if (needHide) {
+                    setOverlaysVisible(false)
+                    // VirtualDisplay 镜像有延迟，不等一下拿到的还是隐藏前那帧
+                    Thread.sleep(130)
+                }
+
                 val t0 = System.currentTimeMillis()
                 val raw = runCatching { capture?.grab(rect) }
                     .onFailure { Logger.e("Recognize", "截取 $name 失败", it) }
                     .getOrNull()
+
+                if (needHide) setOverlaysVisible(true)
 
                 if (raw == null) {
                     if (!silent) panelView?.setAdvice("截图失败，详见「日志」页。")
@@ -792,9 +803,45 @@ class OverlayService : Service(), PanelView.Host {
                 Logger.e("Recognize", "识别流程异常", t)
                 if (!silent) panelView?.setAdvice("识别出错：${t.javaClass.simpleName}\n详见「日志」页。")
             } finally {
+                if (needHide) setOverlaysVisible(true)
                 busy = false
             }
         }
+    }
+
+    /** 识别期间临时藏起自己的窗口，拍完立刻恢复 */
+    private fun setOverlaysVisible(visible: Boolean) {
+        val v = if (visible) View.VISIBLE else View.INVISIBLE
+        handler.post {
+            runCatching {
+                panelView?.visibility = v
+                ballView?.visibility = v
+                handleView?.visibility = v
+                gripView?.visibility = v
+            }
+        }
+    }
+
+    /** 悬浮窗是否压在识别区上。不压就不用藏，省掉那一下闪烁 */
+    private fun overlaysOverlap(region: android.graphics.RectF): Boolean {
+        val sw = screenW().toFloat()
+        val sh = screenH().toFloat()
+        val rl = region.left * sw
+        val rt = region.top * sh
+        val rr = region.right * sw
+        val rb = region.bottom * sh
+
+        fun hits(v: View?, p: WindowManager.LayoutParams?): Boolean {
+            if (v == null || p == null || v.visibility != View.VISIBLE) return false
+            val w = if (p.width > 0) p.width else v.width
+            val h = if (p.height > 0) p.height else v.height
+            return p.x < rr && p.x + w > rl && p.y < rb && p.y + h > rt
+        }
+
+        return hits(panelView, panelParams) ||
+            hits(ballView, ballParams) ||
+            hits(handleView, handleParams) ||
+            hits(gripView, gripParams)
     }
 
     // ---------------- 实时建议 ----------------

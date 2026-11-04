@@ -11,10 +11,16 @@
 # ///
 """按旋律填词：音频 / MIDI → 填词模板；歌词 → 字数、押韵、倒字校验。
 
+  uv run melody_lyrics.py info 歌.mp3                  读文件标签（Suno 的歌名、风格提示词、歌词）
   uv run melody_lyrics.py extract 清唱.wav             清唱、哼唱、分离后的人声：pYIN 逐帧测音高
   uv run melody_lyrics.py extract 整首歌.mp3           带伴奏会自动识别，改用 Melodia 提主旋律
   uv run melody_lyrics.py extract 旋律.mid --track 2   MIDI：Basic Pitch / SOME / 扒谱软件导出
-  uv run melody_lyrics.py check 清唱.melody.json 歌词.txt
+  uv run melody_lyrics.py sections 歌.melody.json      按音区分出人声段和器乐段
+  uv run melody_lyrics.py lines 歌.mp3 歌.melody.json --section 主歌1=15.8 --section 副歌=45.5
+                                                       按拍子把人声切成两小节一句，数每句几个字
+  uv run melody_lyrics.py template 简谱.txt -o 模板.json  手工整理的简谱 → 校验模板
+  uv run melody_lyrics.py check 模板.json 歌词.txt     字数、韵脚、倒字、闭口音、人称和虚词
+  uv run melody_lyrics.py rhyme 歌词.txt               句尾单押 / 双押 / 三押、宽韵
 
 没有 uv 时：pip install librosa soundfile mido pypinyin（带伴奏还要 essentia，Windows 装不了），
 再用 python3 运行。只做 check 只需要 pypinyin；只处理 MIDI 只需要 mido。
@@ -61,6 +67,12 @@ RHYME_GROUPS = {  # 十三辙（pypinyin strict 韵母写法，ü 记作 v）
 }
 FINAL_TO_GROUP = {f: g for g, finals in RHYME_GROUPS.items() for f in finals}
 CLOSED_FINALS = {"i", "u", "v", "ü"}  # 闭口音，长高音上难唱开
+WIDE_RHYME = {"言前": "an/ang", "江阳": "an/ang", "人辰": "en/eng/ong", "中东": "en/eng/ong", "一七": "i/ü"}
+VOICE_RANGES = {"male": (46, 72), "female": (53, 79)}  # 单个音：男声 ♭B2–C5，女声 F3–G5
+VOICE_MEDIANS = {"male": (45, 67), "female": (52, 74)}  # 一句的中位音：男声 A2–G4，女声 E3–D5
+ASCII_DEGREES = ["1", "#1", "2", "b3", "3", "4", "#4", "5", "#5", "6", "b7", "7"]
+STEPS = {"1": 0, "2": 2, "3": 4, "4": 5, "5": 7, "6": 9, "7": 11}
+PRONOUNS, FILLERS = "你我他她", "的了吗吧"
 
 CJK = re.compile(r"[㐀-䶿一-鿿豈-﫿]")
 TAG_LINE = re.compile(r"^\s*[\[【(（].*[\]】)）]\s*$")  # 整行是段落标签或和声
@@ -120,6 +132,39 @@ def jianpu(pitch: int, do_pitch: int) -> str:
     octave, step = divmod(pitch - do_pitch, 12)
     mark = OCTAVE_MARKS.get(octave, ("'" * octave) if octave > 0 else ("," * -octave))
     return DEGREES[step] + mark
+
+
+def ascii_jianpu(pitch: int, do_pitch: int, long: bool = False) -> str:
+    """简谱的纯文本写法：, 低八度，' 高八度，# / b 升降，结尾 - 表示长音。"""
+    octave, step = divmod(pitch - do_pitch, 12)
+    mark = "'" * octave if octave > 0 else "," * -octave
+    return ASCII_DEGREES[step] + mark + ("-" if long else "")
+
+
+def parse_ascii_note(token: str, do_pitch: int) -> tuple[int, bool]:
+    m = re.fullmatch(r"([#b]?)([1-7])([,']*)(-?)", token)
+    if not m:
+        raise SystemExit(f"看不懂这个音：{token}（例：5, 是低八度的 5，6' 是高八度的 6，#4 是升 4，结尾加 - 表示长音）")
+    accidental = {"#": 1, "b": -1, "": 0}[m.group(1)]
+    octave = m.group(3).count("'") - m.group(3).count(",")
+    return do_pitch + STEPS[m.group(2)] + accidental + 12 * octave, bool(m.group(4))
+
+
+def parse_note_name(name: str) -> int:
+    """B3、♭E4、F#2 这样的音名 → MIDI 音高。"""
+    m = re.fullmatch(r"([A-Ga-g])([#b♯♭]?)(-?\d)", name.strip())
+    if not m:
+        raise SystemExit(f"看不懂这个音名：{name}（例：B3、♭E4、F#2）")
+    base = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}[m.group(1).upper()]
+    accidental = {"#": 1, "♯": 1, "b": -1, "♭": -1, "": 0}[m.group(2)]
+    return base + accidental + 12 * (int(m.group(3)) + 1)
+
+
+def voice_range(args) -> tuple[int, int]:
+    if getattr(args, "range", None):
+        lo, _, hi = args.range.partition(":")
+        return parse_note_name(lo), parse_note_name(hi)
+    return VOICE_RANGES[args.voice]
 
 
 def move_arrow(prev: int | None, cur: int) -> str:
@@ -536,6 +581,7 @@ def build_template(notes: list[Note], meta: dict, source: str, gap: float, max_n
         "source": source,
         **meta,
         "key": key,
+        "do_pitch": do_pitch,
         "range": [note_name(lo), note_name(hi)],
         "long_note_sec": round(long_sec, 2),
         "phrases": phrases,
@@ -550,12 +596,14 @@ def render_template(t: dict) -> str:
         if t["mode_auto"]:
             how += "（自动判断，不对就用 --mode vocal 或 --mode mix）"
         src = f"音频，{how}；音准偏差 {t['tuning_cents']:+d} 音分已校正"
+    elif t["source_type"] == "spec":
+        src = "手工整理的简谱"
     else:
         src = f"MIDI 轨「{t['track']}」"
         if len(t["tracks"]) > 1:
             src += "（可选：" + "，".join(t["tracks"]) + "；换轨用 --track N）"
-    bpm = f"≈{t['bpm']:g} BPM"
-    if t["bpm_estimated"]:
+    bpm = f"≈{t['bpm']:g} BPM" if t.get("bpm") else "未知"
+    if t.get("bpm_estimated"):
         bpm += "（自动估计，常差一倍，可用 --bpm 指定）"
     lines = [
         f"# 填词模板 · {t['source']}",
@@ -762,11 +810,334 @@ def cmd_check(args) -> None:
         out.append(f"- 还差第 {len(lines) + 1}–{len(phrases)} 句没写")
     if groups:
         out.append("- 韵脚：" + "、".join(f"{g}辙 ×{c}" for g, c in sorted(groups.items(), key=lambda x: -x[1])))
+    body = "".join(line["raw"] for line in lines)
+    counts = [f"{c}×{body.count(c)}" for c in PRONOUNS if c in body]
+    fills = [f"{c}×{body.count(c)}" for c in FILLERS if c in body]
+    out.append(f"- 人称：{' '.join(counts) or '无'}　虚词：{' '.join(fills) or '无'}")
     out += ["", "| 句 | 歌词 | 字/音 | 韵脚 | 备注 |", "|---|---|---|---|---|", *rows]
     if hints:
         out += ["", "## 提示（不是硬错，唱一遍再决定改不改）", "", *hints]
     out += ["", "## 简谱对照", "", *sheets]
     print("\n".join(out).rstrip())
+
+
+# ---------------- 文件信息 / 分段 / 按拍子定字数 / 手工模板 / 押韵 ----------------
+
+
+def cmd_info(args) -> None:
+    ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        raise SystemExit("需要 ffprobe（装 ffmpeg 就有）。")
+    path = Path(args.input)
+    res = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration,bit_rate:format_tags", "-of", "json", str(path)],
+        capture_output=True,
+        text=True,
+    )
+    if res.returncode:
+        raise SystemExit(f"读不了文件信息：{res.stderr.strip()}")
+    fmt = json.loads(res.stdout).get("format", {})
+    tags = {k.lower(): v for k, v in fmt.get("tags", {}).items()}
+    labels = {"title": "歌名", "artist": "作者", "album": "专辑", "genre": "风格", "date": "日期", "comment": "备注"}
+    lines = [f"# 文件信息 · {path.name}", ""]
+    if fmt.get("duration"):
+        lines.append(f"- 时长：{mmss(float(fmt['duration']))}")
+    for key, label in labels.items():
+        if tags.get(key):
+            lines.append(f"- {label}：{tags[key]}")
+    lyric_keys = [k for k in tags if "lyric" in k]
+    for k in lyric_keys:
+        text = "\n".join(s for s in tags[k].splitlines() if s.strip())
+        lines += ["", f"## 标签里的歌词（{k}）", "", "```", text, "```"]
+    if "suno" in tags.get("comment", "").lower():
+        lines += ["", "这是 Suno 生成的歌：歌词标签里常带着风格提示词（括号里的英文），也可能被截断，以实际内容为准。"]
+    if len(lines) <= 3 and not lyric_keys:
+        lines.append("- 没有歌名、歌词之类的标签")
+    print("\n".join(lines))
+
+
+def phrase_stats(p: dict) -> dict:
+    pitches = [n["pitch"] for n in p["notes"]]
+    span = p["notes"][-1]["end"] - p["notes"][0]["start"]
+    return {
+        "lo": min(pitches),
+        "hi": max(pitches),
+        "med": median(pitches),
+        "rate": len(pitches) / span if span > 0 else 0.0,
+    }
+
+
+def cmd_sections(args) -> None:
+    tpl = json.loads(Path(args.template).read_text(encoding="utf-8"))
+    lo, hi = voice_range(args)
+    mlo, mhi = (lo, hi) if args.range else VOICE_MEDIANS[args.voice]
+    rows = []
+    for p in tpl["phrases"]:
+        st = phrase_stats(p)
+        above = sum(1 for n in p["notes"] if n["pitch"] > hi)
+        if st["med"] > mhi or above > 1:
+            kind = "高音区乐器"
+        elif st["med"] < mlo:
+            kind = "低音区乐器"
+        else:
+            kind = "人声"
+        rows.append((p, st, kind))
+
+    out = [
+        f"# 分段 · {tpl['source']}",
+        "",
+        f"判断规则：一句的中位音在 {note_name(mlo)}–{note_name(mhi)}、而且高过 {note_name(hi)} 的音不超过 1 个，算人声；"
+        "否则算乐器（--voice male/female 或 --range 低:高 可改）。",
+        "",
+        "| 句 | 时间 | 音数 | 音域 | 中位音 | 判断 | 简谱 |",
+        "|---|---|---|---|---|---|---|",
+    ]
+    for p, st, kind in rows:
+        jp = " ".join(n["jianpu"] for n in p["notes"])
+        out.append(
+            f"| {p['index']} | {mmss(p['start'])}–{mmss(p['end'])} | {len(p['notes'])} | "
+            f"{note_name(st['lo'])}–{note_name(st['hi'])} | {note_name(round(st['med']))} | {kind} | {jp} |"
+        )
+
+    # 相邻同类合并成段；夹在两段同类中间的单句当作夹杂，并进去
+    blocks: list[list] = []
+    for p, _, kind in rows:
+        if blocks and blocks[-1][0] == kind:
+            blocks[-1][2] = p
+        else:
+            blocks.append([kind, p, p])
+    i = 1
+    while i < len(blocks) - 1:
+        single = blocks[i][1] is blocks[i][2]
+        if single and blocks[i - 1][0] == blocks[i + 1][0]:
+            blocks[i - 1][2] = blocks[i + 1][2]
+            del blocks[i : i + 2]
+        else:
+            i += 1
+    out += ["", "## 段落推测", ""]
+    for kind, first, last in blocks:
+        n = last["index"] - first["index"] + 1
+        out.append(f"- {mmss(first['start'])}–{mmss(last['end'])} · {kind}（第 {first['index']}–{last['index']} 句，共 {n} 句）")
+    out += [
+        "",
+        "人声段的开头时间可以直接给 lines 命令的 --section 用（会自动对齐到最近的拍子）。"
+        "乐器旋律太响时会盖住人声：人声段里夹着的高音句多半是乐器，不要往里填词。",
+    ]
+    print("\n".join(out))
+
+
+def cmd_lines(args) -> None:
+    import bisect
+
+    import numpy as np
+    import librosa
+
+    tpl = json.loads(Path(args.template).read_text(encoding="utf-8"))
+    notes = [n for p in tpl["phrases"] for n in p["notes"]]
+    if not notes:
+        raise SystemExit("模板里没有音符。")
+    do_pitch = tpl.get("do_pitch") or choose_do([Note(n["start"], n["end"], n["pitch"], 0) for n in notes], tpl["key"]["do"])
+    long_sec = tpl.get("long_note_sec", 0.4)
+    lo, hi = voice_range(args)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        y = load_audio(Path(args.audio), 22050, None, None)
+        tempo, beats = librosa.beat.beat_track(y=y, sr=22050, hop_length=256, units="time")
+    beats = [float(b) for b in beats]
+    if len(beats) < 8:
+        raise SystemExit("拍子检测失败（音频太短或没有明显节拍）。")
+    step = float(np.median(np.diff(beats)))
+    bpm = float(np.atleast_1d(tempo)[0])
+
+    def beat_pos(t: float) -> float:
+        i = bisect.bisect_right(beats, t) - 1
+        if i < 0:
+            return (t - beats[0]) / step
+        if i + 1 >= len(beats):
+            return i + (t - beats[i]) / step
+        return i + (t - beats[i]) / (beats[i + 1] - beats[i])
+
+    # 只留人声音区；很短又紧贴下一个音的碎音是滑音，并进下一个音
+    voc = [n for n in notes if lo <= n["pitch"] <= hi]
+    clean = [
+        n
+        for i, n in enumerate(voc)
+        if not (n["end"] - n["start"] < 0.11 and i + 1 < len(voc) and voc[i + 1]["start"] - n["end"] < 0.06)
+    ]
+    for n in clean:
+        n["b"] = beat_pos(n["start"])
+    others = [(beat_pos(n["start"]), n) for n in notes if n["pitch"] > hi]
+
+    per = args.bars * args.beats_per_bar
+    out = [
+        f"# 每句字数 · {tpl['source']}",
+        "",
+        f"- 速度：≈{bpm:.1f} BPM（拍点自动检测）；每句 {args.bars} 小节、每小节 {args.beats_per_bar} 拍，"
+        f"小节线前 {args.pickup:g} 拍内的音算下一句的弱起",
+        f"- 1={PC_NAMES[do_pitch % 12]}（中音 1 = {note_name(do_pitch)}）；只数人声音区 {note_name(lo)}–{note_name(hi)} 的音，"
+        "不到 0.11 秒的滑音并进后一个音；— 表示长音",
+        "",
+    ]
+    spec = [
+        f"# 1={note_name(do_pitch)}",
+        f"# 来源：{tpl['source']}，用 lines 自动切分；对着原曲改好再用 template 生成校验模板",
+        "",
+    ]
+    for sec in args.section:
+        name, eq, rest = sec.partition("=")
+        if not eq:
+            raise SystemExit(f"--section 要写成 名字=开始秒数[:句数]，例如 主歌1=15.8:8（收到：{sec}）")
+        start, _, count = rest.partition(":")
+        n_lines = int(count) if count else args.lines
+        b0 = min(range(len(beats)), key=lambda i: abs(beats[i] - float(start)))
+        out += [
+            f"## {name}（第一个小节线 {mmss(beats[b0])}，{n_lines} 句）",
+            "",
+            "| 句 | 开始 | 字数 | 简谱 | 备注 |",
+            "|---|---|---|---|---|",
+        ]
+        spec.append(f"# {name}")
+        for k in range(n_lines):
+            lo_b = b0 + per * k - args.pickup
+            hi_b = lo_b + per
+            ln = [n for n in clean if lo_b <= n["b"] < hi_b]
+            masked = sum(1 for b, _ in others if lo_b <= b < hi_b)
+            t0 = beats[max(0, min(len(beats) - 1, int(lo_b)))]
+            jp = " ".join(n["jianpu"] + ("—" if n["end"] - n["start"] >= long_sec else "") for n in ln)
+            note = f"另有 {masked} 个高音区的音，可能是乐器盖住了人声" if masked else ""
+            if not ln:
+                note = "没扒到人声，可能是器乐段"
+            out.append(f"| {name}-{k + 1} | {mmss(t0)} | {len(ln)} | {jp or '—'} | {note} |")
+            tokens = " ".join(ascii_jianpu(n["pitch"], do_pitch, n["end"] - n["start"] >= long_sec) for n in ln)
+            spec.append(f"{name}-{k + 1}: {tokens}" if ln else f"# {name}-{k + 1}: （没扒到人声）")
+        out.append("")
+        spec.append("")
+    out.append(
+        "字数可靠程度：同一段旋律出现两次（比如两遍副歌）时两边一致，就比较可靠；被乐器盖住的句子只能估，"
+        "请用户对着原曲哼一遍确认，或者给人声分轨 / MIDI。"
+    )
+    print("\n".join(out))
+    if args.out:
+        Path(args.out).write_text("\n".join(spec), encoding="utf-8")
+        print(f"\n简谱规格已保存：{args.out}（核对、修改后运行：template {args.out} -o 模板.json）")
+
+
+def cmd_template(args) -> None:
+    text = Path(args.spec).read_text(encoding="utf-8")
+    do_pitch = parse_note_name(args.do) if args.do else None
+    lines: list[tuple[str, list[str]]] = []
+    for raw in text.splitlines():
+        s = raw.strip()
+        if not s:
+            continue
+        if s.startswith("#"):
+            m = re.match(r"#\s*1\s*=\s*([A-Ga-g][#b♯♭]?-?\d)", s)
+            if m and do_pitch is None:
+                do_pitch = parse_note_name(m.group(1))
+            continue
+        name, sep, body = re.split(r"([:：])", s, maxsplit=1) if re.search(r"[:：]", s) else ("", "", s)
+        if not body.split():
+            continue
+        lines.append((name.strip() or f"第{len(lines) + 1}句", body.split()))
+    if do_pitch is None:
+        raise SystemExit("不知道 1 是哪个音：在规格文件里写一行 # 1=B3，或者用 --do B3。")
+    if not lines:
+        raise SystemExit("规格文件里没有旋律行。")
+
+    parsed = [(name, [parse_ascii_note(t, do_pitch) for t in toks]) for name, toks in lines]
+    pitches = [p for _, ns in parsed for p, _ in ns]
+    lo, hi = min(pitches), max(pitches)
+    high_from = lo + 0.7 * (hi - lo) if hi - lo >= BIG_LEAP else float("inf")
+    phrases = []
+    for i, (name, ns) in enumerate(parsed, 1):
+        rec_notes, prev = [], None
+        for p, long in ns:
+            rec_notes.append(
+                {
+                    "start": 0,
+                    "end": 0,
+                    "pitch": p,
+                    "name": note_name(p),
+                    "jianpu": jianpu(p, do_pitch),
+                    "beats": 1,
+                    "long": long,
+                    "high": p >= high_from,
+                    "move": move_arrow(prev, p),
+                }
+            )
+            prev = p
+        phrases.append(
+            {"index": i, "label": name, "start": 0, "end": 0, "repeat_of": None, "similar_to": None, "notes": rec_notes}
+        )
+    for rec in phrases:  # 旋律相同的句子
+        seq = [n["pitch"] for n in rec["notes"]]
+        for other in phrases[: rec["index"] - 1]:
+            if [n["pitch"] for n in other["notes"]] == seq:
+                rec["repeat_of"] = other["index"]
+                break
+    tpl = {
+        "version": 1,
+        "source": Path(args.spec).name,
+        "source_type": "spec",
+        "bpm": args.bpm,
+        "bpm_estimated": False,
+        "key": {"tonic": do_pitch % 12, "mode": "major", "do": do_pitch % 12, "label": f"1={PC_NAMES[do_pitch % 12]}"},
+        "do_pitch": do_pitch,
+        "range": [note_name(lo), note_name(hi)],
+        "long_note_sec": 0.4,
+        "phrases": phrases,
+    }
+    out = Path(args.out) if args.out else Path(args.spec).with_suffix(".melody.json")
+    out.write_text(json.dumps(tpl, ensure_ascii=False, indent=1), encoding="utf-8")
+    print(f"模板已保存：{out}（{len(phrases)} 句：" + "、".join(f"{p['label']} {len(p['notes'])} 音" for p in phrases) + "）")
+
+
+def rhyme_tail(units: list[dict], k: int = 3) -> list[dict]:
+    return [u for u in units if u["kind"] == "zh"][-k:]
+
+
+def cmd_rhyme(args) -> None:
+    text = sys.stdin.read() if args.lyrics == "-" else Path(args.lyrics).read_text(encoding="utf-8")
+    lines = parse_lyrics(text)
+    if not lines:
+        raise SystemExit("没有可分析的歌词行。")
+    annotate_pinyin(lines)
+    if not 1 <= args.ref <= len(lines):
+        raise SystemExit(f"--ref 要在 1–{len(lines)} 之间。")
+    base = rhyme_tail(lines[args.ref - 1]["units"])
+
+    def group(u: dict) -> str:
+        return FINAL_TO_GROUP.get(u["final"], "?")
+
+    out = [
+        f"# 押韵分析（对照第 {args.ref} 句「{''.join(u['text'] for u in base)}」）",
+        "",
+        "单押 = 最后一个字同韵；双押 = 最后两个字分别同韵；三押 = 最后三个字。宽韵把前后鼻音、i/ü 算作一家。",
+        "",
+        "| 句 | 句尾 | 拼音 | 韵辙 | 和对照句 | 宽韵 |",
+        "|---|---|---|---|---|---|",
+    ]
+    for i, line in enumerate(lines, 1):
+        tail = rhyme_tail(line["units"])
+        if not tail:
+            out.append(f"| {i} | {line['raw']} | – | – | – | – |")
+            continue
+        n = 0
+        for a, b in zip(tail[::-1], base[::-1]):
+            if group(a) != group(b):
+                break
+            n += 1
+        strict = "（对照句）" if i == args.ref else {3: "三押", 2: "双押", 1: "单押"}.get(n, "不押")
+        last, ref_last = group(tail[-1]), group(base[-1])
+        wide = WIDE_RHYME.get(last, last)
+        loose = "同韵" if wide == WIDE_RHYME.get(ref_last, ref_last) else "不同"
+        out.append(
+            f"| {i} | {''.join(u['text'] for u in tail)} | {' '.join(u['pinyin'] for u in tail)} | "
+            f"{'·'.join(group(u) for u in tail)} | {strict} | {wide}（{loose}） |"
+        )
+    out += ["", "多音字可能读错（比如「长堤」被读成 zhǎng），以实际唱法为准。"]
+    print("\n".join(out))
 
 
 # ---------------- 命令行 ----------------
@@ -796,10 +1167,47 @@ def main() -> None:
     ex.add_argument("--fmax", default="C6", help="音频：最高音（默认 C6）")
     ex.set_defaults(func=cmd_extract)
 
-    ck = sub.add_parser("check", help="校验歌词：字数、韵脚（十三辙）、倒字和闭口音提示")
-    ck.add_argument("template", help="extract 生成的 .melody.json")
+    ck = sub.add_parser("check", help="校验歌词：字数、韵脚（十三辙）、倒字、闭口音、人称和虚词")
+    ck.add_argument("template", help="extract 或 template 生成的 .melody.json")
     ck.add_argument("lyrics", help="歌词文本，一行对应一句；- 表示从标准输入读")
     ck.set_defaults(func=cmd_check)
+
+    inf = sub.add_parser("info", help="读音频文件的标签：歌名、作者、Suno 风格提示词和歌词")
+    inf.add_argument("input")
+    inf.set_defaults(func=cmd_info)
+
+    def add_voice(p):
+        p.add_argument("--voice", choices=sorted(VOICE_RANGES), default="male", help="人声音区预设（默认 male）")
+        p.add_argument("--range", help="自定人声音区，如 A2:C5")
+
+    se = sub.add_parser("sections", help="按音区把 extract 的结果分成人声段和器乐段")
+    se.add_argument("template", help="extract 生成的 .melody.json")
+    add_voice(se)
+    se.set_defaults(func=cmd_sections)
+
+    li = sub.add_parser("lines", help="按拍子把人声切成固定小节数一句，数每句的字数，输出可编辑的简谱规格")
+    li.add_argument("audio", help="原音频（用来检测拍点）")
+    li.add_argument("template", help="同一首歌 extract 生成的 .melody.json")
+    li.add_argument("--section", action="append", required=True, help="段名=第一个小节线的秒数[:句数]，可写多次")
+    li.add_argument("--lines", type=int, default=8, help="每段默认几句（默认 8）")
+    li.add_argument("--bars", type=int, default=2, help="几小节算一句（默认 2）")
+    li.add_argument("--beats-per-bar", type=int, default=4, help="每小节几拍（默认 4）")
+    li.add_argument("--pickup", type=float, default=1.25, help="小节线前多少拍内的音算下一句的弱起（默认 1.25）")
+    li.add_argument("-o", "--out", help="把简谱规格存成文本，给 template 用")
+    add_voice(li)
+    li.set_defaults(func=cmd_lines)
+
+    tp = sub.add_parser("template", help="手工整理的简谱规格 → 校验模板 .melody.json")
+    tp.add_argument("spec", help="规格文本：每行「句名: 1, 2, 3 5,- …」，, 低八度 ' 高八度，- 长音")
+    tp.add_argument("-o", "--out", help="输出路径（默认：<文件名>.melody.json）")
+    tp.add_argument("--do", help="中音 1 是哪个音，如 B3（也可在规格里写 # 1=B3）")
+    tp.add_argument("--bpm", type=float, help="速度，只用来显示")
+    tp.set_defaults(func=cmd_template)
+
+    rh = sub.add_parser("rhyme", help="句尾押韵分析：单押 / 双押 / 三押、宽韵")
+    rh.add_argument("lyrics", help="歌词文本；- 表示从标准输入读")
+    rh.add_argument("--ref", type=int, default=1, help="拿第几句当对照（默认第 1 句）")
+    rh.set_defaults(func=cmd_rhyme)
 
     args = parser.parse_args()
     args.func(args)

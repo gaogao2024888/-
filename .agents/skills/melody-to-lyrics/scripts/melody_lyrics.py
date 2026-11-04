@@ -6,16 +6,18 @@
 #     "soundfile>=0.12",
 #     "mido>=1.3",
 #     "pypinyin>=0.50",
+#     "essentia>=2.1b6.dev1110; sys_platform == 'linux'",
 # ]
 # ///
 """按旋律填词：音频 / MIDI → 填词模板；歌词 → 字数、押韵、倒字校验。
 
-  uv run melody_lyrics.py extract 清唱.wav             音频：清唱、哼唱、分离后的人声最好
+  uv run melody_lyrics.py extract 清唱.wav             清唱、哼唱、分离后的人声：pYIN 逐帧测音高
+  uv run melody_lyrics.py extract 整首歌.mp3           带伴奏会自动识别，改用 Melodia 提主旋律
   uv run melody_lyrics.py extract 旋律.mid --track 2   MIDI：Basic Pitch / SOME / 扒谱软件导出
   uv run melody_lyrics.py check 清唱.melody.json 歌词.txt
 
-没有 uv 时：pip install librosa soundfile mido pypinyin，再用 python3 运行。
-只做 check 只需要 pypinyin；只处理 MIDI 只需要 mido。
+没有 uv 时：pip install librosa soundfile mido pypinyin（带伴奏还要 essentia，Windows 装不了），
+再用 python3 运行。只做 check 只需要 pypinyin；只处理 MIDI 只需要 mido。
 """
 
 from __future__ import annotations
@@ -246,34 +248,85 @@ def segment_frames(midi, ok, rms, min_len: int) -> list[tuple[int, int, int]]:
     return notes
 
 
+def melodia_f0(y, sr: int, hop: int, fmin: float, fmax: float):
+    """带伴奏的整首歌：用 Melodia 提主旋律（通常就是人声）。返回每帧频率，0 表示这帧没有旋律。"""
+    try:
+        import essentia
+
+        essentia.log.infoActive = False
+        essentia.log.warningActive = False
+        import essentia.standard as es
+    except ImportError as exc:
+        raise SystemExit(
+            "这段音频带伴奏，要用 essentia 从整首歌里提主旋律。Linux 上 uv run 会自动安装；"
+            "其他系统试试 pip install essentia（Windows 装不了，请先分离出人声）。\n"
+            "如果其实是清唱或分离好的人声，加 --mode vocal。"
+        ) from exc
+    import numpy as np
+
+    audio = es.EqualLoudness(sampleRate=sr)(y.astype(np.float32))
+    pitch, _ = es.PredominantPitchMelodia(
+        sampleRate=sr, frameSize=2048, hopSize=hop, minFrequency=max(80.0, fmin), maxFrequency=fmax
+    )(audio)
+    return np.asarray(pitch, dtype=float)
+
+
+def harmonic_energy(y, sr: int, hop: int, f0):
+    """每帧只量旋律音的前 5 个泛音上的能量。伴奏一直在响，整体音量看不出换字，
+    但人声泛音在辅音处会掉下去。"""
+    import numpy as np
+    import librosa
+
+    spec = np.abs(librosa.stft(y, n_fft=2048, hop_length=hop))
+    energy = np.zeros(len(f0))
+    for t in range(min(spec.shape[1], len(f0))):
+        if f0[t] > 0:
+            bins = np.rint(np.arange(1, 6) * f0[t] * 2048 / sr).astype(int)
+            energy[t] = sum(spec[b - 1 : b + 2, t].max() for b in bins if b < spec.shape[0] - 1)
+    return energy
+
+
 def notes_from_audio(path: Path, args) -> tuple[list[Note], dict]:
     import numpy as np
     import librosa
 
-    sr, hop = 22050, 256
+    sr, hop = 44100, 512  # 每帧约 11.6 毫秒
     y = load_audio(path, sr, args.start, args.end)
     if len(y) < sr:
         raise SystemExit("音频不到 1 秒，没法分析。")
+    fmin, fmax = librosa.note_to_hz(args.fmin), librosa.note_to_hz(args.fmax)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
-        # 46 毫秒的分析窗，字与字之间短短的辅音停顿也能听出来
-        f0, voiced, _ = librosa.pyin(
-            y,
-            fmin=librosa.note_to_hz(args.fmin),
-            fmax=librosa.note_to_hz(args.fmax),
-            sr=sr,
-            frame_length=1024,
-            hop_length=hop,
-        )
-        rms = librosa.feature.rms(y=y, frame_length=512, hop_length=hop)[0]
-        rms = np.convolve(np.pad(rms, (0, max(0, len(f0) - len(rms))), mode="edge"), np.ones(3) / 3, "same")
-        ok = voiced & np.isfinite(f0)
-        if ok.sum() >= 20:
-            ok &= rms >= 0.03 * np.percentile(rms[ok], 95)  # 比最响处低 30 dB 以上的当噪声
+        rms = librosa.feature.rms(y=y, frame_length=1024, hop_length=hop)[0]
+        # 清唱在换气处几乎没声音；有伴奏时最安静的时候也很响
+        backing = float(np.percentile(rms, 10) / max(float(np.percentile(rms, 90)), 1e-9))
+        mode = args.mode if args.mode != "auto" else ("mix" if backing >= 0.1 else "vocal")
+        if mode == "mix":
+            f0 = melodia_f0(y, sr, hop, fmin, fmax)
+            n = min(len(f0), len(rms))
+            f0 = f0[:n]
+            ok = f0 > 0
+            level = np.convolve(harmonic_energy(y, sr, hop, f0), np.ones(3) / 3, "same")
+        else:
+            # 46 毫秒的分析窗，字与字之间短短的辅音停顿也能听出来
+            f0, voiced, _ = librosa.pyin(
+                librosa.resample(y, orig_sr=sr, target_sr=sr // 2),
+                fmin=fmin,
+                fmax=fmax,
+                sr=sr // 2,
+                frame_length=1024,
+                hop_length=hop // 2,
+            )
+            n = min(len(f0), len(rms))
+            f0, voiced = f0[:n], voiced[:n]
+            level = np.convolve(rms[:n], np.ones(3) / 3, "same")
+            ok = voiced & np.isfinite(f0)
+            if ok.sum() >= 20:
+                ok &= level >= 0.03 * np.percentile(level[ok], 95)  # 比最响处低 30 dB 以上的当噪声
         if ok.sum() < 20:
-            raise SystemExit("没听出清晰的单旋律。换清唱、哼唱或分离后的人声，或者改用 MIDI。")
+            raise SystemExit("没听出清晰的旋律。换清唱、哼唱或分离后的人声，或者改用 MIDI。")
         tuning = float(librosa.pitch_tuning(f0[ok], bins_per_octave=12))  # 跑调/非标准音高校正
-        midi = np.full(f0.shape, np.nan)
+        midi = np.full(n, np.nan)
         midi[ok] = librosa.hz_to_midi(f0[ok]) - tuning
         if args.bpm:
             bpm, estimated = float(args.bpm), False
@@ -284,11 +337,14 @@ def notes_from_audio(path: Path, args) -> tuple[list[Note], dict]:
     fps = sr / hop
     offset = args.start or 0.0
     notes = []
-    for s, e, pitch in segment_frames(midi, ok, rms, max(2, round(args.min_note * fps))):
+    for s, e, pitch in segment_frames(midi, ok, level, max(2, round(args.min_note * fps))):
         start, end = offset + s / fps, offset + e / fps
         notes.append(Note(start, end, pitch, (end - start) * bpm / 60))
     meta = {
         "source_type": "audio",
+        "mode": mode,
+        "mode_auto": args.mode == "auto",
+        "backing": round(backing, 3),
         "bpm": round(bpm, 1),
         "bpm_estimated": estimated,
         "tuning_cents": round(tuning * 100),
@@ -490,7 +546,10 @@ def render_template(t: dict) -> str:
     ph = t["phrases"]
     counts = [len(p["notes"]) for p in ph]
     if t["source_type"] == "audio":
-        src = f"音频自动扒旋律（pYIN；音准偏差 {t['tuning_cents']:+d} 音分已校正）"
+        how = "带伴奏，用 Melodia 提主旋律" if t["mode"] == "mix" else "清唱/人声，用 pYIN 测音高"
+        if t["mode_auto"]:
+            how += "（自动判断，不对就用 --mode vocal 或 --mode mix）"
+        src = f"音频，{how}；音准偏差 {t['tuning_cents']:+d} 音分已校正"
     else:
         src = f"MIDI 轨「{t['track']}」"
         if len(t["tracks"]) > 1:
@@ -726,6 +785,12 @@ def main() -> None:
     ex.add_argument("--track", type=int, help="MIDI 用第几条轨（输出里有编号）")
     ex.add_argument("--start", type=float, help="从第几秒开始分析")
     ex.add_argument("--end", type=float, help="分析到第几秒")
+    ex.add_argument(
+        "--mode",
+        choices=["auto", "vocal", "mix"],
+        default="auto",
+        help="音频：vocal=清唱/哼唱/人声分轨，mix=带伴奏的整首歌，auto=自动判断（默认）",
+    )
     ex.add_argument("--min-note", type=float, default=0.08, help="音频：最短音长，秒（默认 0.08）")
     ex.add_argument("--fmin", default="C2", help="音频：最低音（默认 C2）")
     ex.add_argument("--fmax", default="C6", help="音频：最高音（默认 C6）")

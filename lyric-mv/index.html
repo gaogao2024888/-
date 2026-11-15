@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>木生遇淑柔 · 歌词 MV</title>
+<link rel="stylesheet" href="css/app.css">
+</head>
+<body>
+<header class="top">
+  <div class="brand"><span class="seal">木</span><div><b>木生遇淑柔</b><small>歌词动画 MV · 预览 / 分镜编辑</small></div></div>
+  <div class="top-actions">
+    <label class="chk"><input type="checkbox" id="optSafe"> 安全框</label>
+    <select id="optQuality" title="预览画质">
+      <option value="960">预览 540p</option>
+      <option value="1280" selected>预览 720p</option>
+      <option value="1920">预览 1080p</option>
+    </select>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage-col">
+    <div class="stage-wrap" id="stageWrap">
+      <canvas id="stage" width="1280" height="720"></canvas>
+      <button class="big-play" id="bigPlay" aria-label="播放">▶</button>
+      <div class="shot-badge" id="shotBadge"></div>
+    </div>
+
+    <div class="transport">
+      <button id="btnPlay" class="primary" title="空格">▶ 播放</button>
+      <button id="btnPrevShot" title="[ 上一个镜头">⏮</button>
+      <button id="btnBack" title="← 后退 1 秒">−1s</button>
+      <button id="btnFrameB" title=", 上一帧">‹帧</button>
+      <button id="btnFrameF" title=". 下一帧">帧›</button>
+      <button id="btnFwd" title="→ 前进 1 秒">+1s</button>
+      <button id="btnNextShot" title="] 下一个镜头">⏭</button>
+      <span class="time" id="timeLabel">00:00.00</span>
+      <label class="chk" title="L：只循环当前镜头，用来逐个检查"><input type="checkbox" id="optLoop"> 循环本镜头</label>
+      <select id="optRate" title="播放速度"><option value="0.5">0.5×</option><option value="0.75">0.75×</option><option value="1" selected>1×</option></select>
+    </div>
+
+    <div class="timeline">
+      <div class="tl-label">全曲 <span>分镜 / 段落 / 歌词 / 鼓点 / 能量</span></div>
+      <canvas id="tlOverview" height="96"></canvas>
+      <div class="tl-label">放大 ±4 秒 <span>逐字时间（竖线）· 节拍（短）· 强拍鼓点（长）—— 用来核对音画同步</span></div>
+      <canvas id="tlZoom" height="84"></canvas>
+    </div>
+  </section>
+
+  <aside class="panel">
+    <nav class="tabs">
+      <button data-tab="shots" class="on">分镜</button>
+      <button data-tab="lyrics">歌词对齐</button>
+      <button data-tab="theme">风格</button>
+      <button data-tab="project">导出 / 工程</button>
+    </nav>
+
+    <div class="tab" id="tab-shots">
+      <ol class="shot-list" id="shotList"></ol>
+      <div class="editor" id="shotEditor"></div>
+    </div>
+
+    <div class="tab hidden" id="tab-lyrics">
+      <p class="hint">边听边对：选中一行，在唱到第一个字时按 <kbd>T</kbd>，这一行的时间就设成当前时间，并自动跳到下一行。<br>整体偏早或偏晚就调「全局偏移」。</p>
+      <div class="row"><label>全局偏移(秒)</label><input type="number" step="0.01" id="lyricOffset"></div>
+      <table class="lyric-table"><thead><tr><th>时间</th><th>歌词</th><th>关键词</th><th></th></tr></thead><tbody id="lyricRows"></tbody></table>
+      <button id="btnAddLyric">+ 在当前时间加一行</button>
+    </div>
+
+    <div class="tab hidden" id="tab-theme">
+      <p class="hint" id="themeMotif"></p>
+      <div id="paletteView"></div>
+      <h4>字体</h4>
+      <div class="font-demo"><span style="font-family:MaShanZheng">马善政楷书 · 歌词 最幸福的事</span><span style="font-family:NotoSerifSC">思源宋体 · 标签 小字</span><span style="font-family:ZCOOLXiaoWei">站酷小薇 · 备选 木轮悠悠</span></div>
+      <p class="hint">配色改动直接写在 <code>data/project.js → theme.palettes</code>，或在「导出 / 工程」里导出 JSON 后修改再导入。</p>
+    </div>
+
+    <div class="tab hidden" id="tab-project">
+      <div class="row"><label>片名</label><input id="metaTitle"></div>
+      <div class="row"><label>片尾字幕</label><input id="metaCredits" placeholder="词：xx 曲：xx 演唱：xx"></div>
+      <h4>工程</h4>
+      <p class="hint">在本页的修改会自动存在这个浏览器里。想长期保留或交给别人，就导出工程文件。</p>
+      <div class="btns">
+        <button id="btnExportJs">导出 project.js（替换 data/ 下同名文件）</button>
+        <button id="btnExportJson">导出 project.json</button>
+        <label class="btn">导入 JSON<input type="file" id="fileImport" accept=".json,application/json" hidden></label>
+        <button id="btnReset" class="danger">恢复默认工程</button>
+      </div>
+      <h4>导出视频</h4>
+      <p class="hint">浏览器录制：实时播放一遍并录成 WebM（需用本地服务器打开，见 README）。<br>逐帧 MP4：<code>node tools/render.mjs</code>，画面逐帧精确，适合正式交付。</p>
+      <div class="btns"><button id="btnRecord" class="primary">● 录制 WebM（1080p）</button></div>
+      <div id="recStatus" class="hint"></div>
+    </div>
+  </aside>
+</main>
+
+<audio id="audio" src="assets/song.mp3" preload="auto"></audio>
+
+<script src="data/analysis.js"></script>
+<script src="data/project.js"></script>
+<script src="js/util.js"></script>
+<script src="js/draw.js"></script>
+<script src="js/engine.js"></script>
+<script src="js/scenes.js"></script>
+<script src="js/app.js"></script>
+</body>
+</html>

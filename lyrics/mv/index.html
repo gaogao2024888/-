@@ -1,0 +1,312 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人生幸事 · 歌词 MV</title>
+<style>
+  html, body { margin: 0; height: 100%; background: #0d0a0c; color: #eee; font-family: "WenQuanYi Zen Hei", "PingFang SC", "Noto Sans CJK SC", sans-serif; }
+  #stage { position: fixed; inset: 0 0 64px 0; display: flex; align-items: center; justify-content: center; }
+  canvas { height: 100%; max-width: 100%; aspect-ratio: 9 / 16; }
+  #bar { position: fixed; left: 0; right: 0; bottom: 0; height: 64px; display: flex; gap: 10px; align-items: center; padding: 0 12px; background: #161214; box-sizing: border-box; }
+  #bar button, #bar select { background: #2a2226; color: #f3d9c4; border: 1px solid #4a3a40; border-radius: 10px; padding: 8px 12px; font-size: 15px; }
+  #bar input[type=range] { flex: 1; accent-color: #f0a46a; }
+  #time { font-variant-numeric: tabular-nums; min-width: 92px; font-size: 14px; color: #cbb; }
+  body.export #bar { display: none; } body.export #stage { inset: 0; }
+</style>
+</head>
+<body>
+<div id="stage"><canvas id="c" width="1080" height="1920"></canvas></div>
+<div id="bar">
+  <button id="play">播放</button>
+  <span id="time">0:00.0</span>
+  <input id="seek" type="range" min="0" max="1000" value="0">
+  <select id="scene"></select>
+</div>
+<audio id="audio" src="audio.mp3" preload="auto"></audio>
+<script src="timeline.js"></script>
+<script>
+"use strict";
+const TL = window.TIMELINE, W = 1080, H = 1920;
+const cv = document.getElementById("c"), ctx = cv.getContext("2d");
+const FONT = '"WenQuanYi Zen Hei", "PingFang SC", "Noto Sans CJK SC", sans-serif';
+const LINES = TL.lines.filter(l => l.text).map((l, i, a) => {
+  const next = TL.lines.find(x => x.t > l.t);
+  return { ...l, end: next ? next.t : TL.duration };
+});
+
+// ---------- 工具 ----------
+const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
+const easeSine = x => 0.5 - 0.5 * Math.cos(Math.PI * clamp(x));      // 柔和的正弦缓动，不过冲
+const easeOut = x => Math.sin(Math.PI / 2 * clamp(x));
+const hash = n => { const s = Math.sin(n * 127.1 + 311.7) * 43758.5453; return s - Math.floor(s); };
+const lerp = (a, b, t) => a + (b - a) * t;
+const mix = (c1, c2, t) => c1.map((v, i) => Math.round(lerp(v, c2[i], t)));
+const rgba = (c, a) => `rgba(${c[0]},${c[1]},${c[2]},${a})`;
+function lastBefore(arr, t) { let lo = 0, hi = arr.length - 1, r = -1; while (lo <= hi) { const m = (lo + hi) >> 1; if (arr[m] <= t) { r = m; lo = m + 1; } else hi = m - 1; } return r; }
+function pulse(arr, t, decay) { const i = lastBefore(arr, t); return i < 0 ? 0 : Math.exp(-(t - arr[i]) / decay); }
+function sectionAt(t) { let s = TL.sections[0]; for (const x of TL.sections) if (x.t <= t) s = x; return s; }
+
+// ---------- 配色：每段用色环上相邻的 2–3 种暖色 ----------
+const C = { amber: [240, 166, 80], honey: [232, 190, 110], peach: [244, 132, 100], rose: [214, 92, 122], plum: [150, 78, 140] };
+const PAL = {
+  "片头": [C.amber, C.peach, C.amber], "主歌一·相遇": [C.amber, C.peach, C.rose], "预副歌·溪水": [C.peach, C.rose, C.peach],
+  "副歌": [C.amber, C.rose, C.peach], "间奏·木轮": [C.honey, C.amber, C.peach], "主歌二·单车": [C.honey, C.amber, C.peach],
+  "副歌后段": [C.peach, C.rose, C.amber], "桥段·晚风": [C.rose, C.plum, C.rose], "副歌·高光": [C.amber, C.peach, C.rose], "尾声": [C.amber, C.rose, C.peach],
+};
+function palette(t) {
+  const secs = TL.sections; let i = 0; for (let k = 0; k < secs.length; k++) if (secs[k].t <= t) i = k;
+  const cur = PAL[secs[i].name], prev = PAL[secs[Math.max(0, i - 1)].name];
+  const k = easeSine((t - secs[i].t) / 2.5);              // 换段时 2.5 秒渐变
+  return cur.map((c, j) => mix(prev[j], c, k));
+}
+
+// ---------- 背景：又大又虚的彩色光团 ----------
+const bgSmall = document.createElement("canvas"); bgSmall.width = 270; bgSmall.height = 480;
+const bgTiny = document.createElement("canvas"); bgTiny.width = 54; bgTiny.height = 96;
+const bctx = bgSmall.getContext("2d"), tctx = bgTiny.getContext("2d");
+const BLOBS = [0, 1, 2, 3, 4].map(i => ({ x: 0.2 + 0.6 * hash(i + 1), y: 0.15 + 0.7 * hash(i + 9), r: 0.42 + 0.2 * hash(i + 4),
+  px: 14 + 9 * hash(i + 2), py: 17 + 8 * hash(i + 6), ph: 6.28 * hash(i + 3), c: i % 3 }));
+function drawBackground(t, pal, glow) {
+  bctx.globalCompositeOperation = "source-over";
+  bctx.fillStyle = "#120c10"; bctx.fillRect(0, 0, 270, 480);
+  bctx.globalCompositeOperation = "lighter";
+  for (const b of BLOBS) {
+    const x = (b.x + 0.16 * Math.sin(t * 6.28 / b.px + b.ph)) * 270;
+    const y = (b.y + 0.12 * Math.cos(t * 6.28 / b.py + b.ph)) * 480;
+    const r = b.r * 270 * (1 + 0.08 * Math.sin(t * 0.4 + b.ph));
+    const g = bctx.createRadialGradient(x, y, 0, x, y, r);
+    g.addColorStop(0, rgba(pal[b.c], 0.55 * glow)); g.addColorStop(0.55, rgba(pal[b.c], 0.22 * glow)); g.addColorStop(1, rgba(pal[b.c], 0));
+    bctx.fillStyle = g; bctx.fillRect(0, 0, 270, 480);
+  }
+  tctx.drawImage(bgSmall, 0, 0, 54, 96);                   // 再缩小一档，给毛玻璃当“虚化后的光”
+  ctx.imageSmoothingEnabled = true; ctx.imageSmoothingQuality = "high";
+  ctx.drawImage(bgSmall, 0, 0, W, H);
+}
+
+// ---------- 毛玻璃卡片 ----------
+function rr(x, y, w, h, r) { ctx.beginPath(); ctx.roundRect(x, y, w, h, r); }
+function glass(x, y, w, h, { r = 52, alpha = 1, edge = 0 } = {}) {
+  if (alpha <= 0) return;
+  ctx.save(); ctx.globalAlpha = alpha;
+  ctx.shadowColor = "rgba(0,0,0,0.35)"; ctx.shadowBlur = 50; ctx.shadowOffsetY = 18;
+  rr(x, y, w, h, r); ctx.fillStyle = "rgba(20,12,16,0.35)"; ctx.fill(); ctx.shadowColor = "transparent";
+  rr(x, y, w, h, r); ctx.clip();
+  ctx.drawImage(bgTiny, 0, 0, W, H);                       // 透出后面虚化的光
+  ctx.fillStyle = "rgba(255,255,255,0.07)"; ctx.fillRect(x, y, w, h);
+  const sheen = ctx.createLinearGradient(x, y, x, y + h);
+  sheen.addColorStop(0, "rgba(255,255,255,0.12)"); sheen.addColorStop(0.4, "rgba(255,255,255,0.02)"); sheen.addColorStop(1, "rgba(0,0,0,0.12)");
+  ctx.fillStyle = sheen; ctx.fillRect(x, y, w, h);
+  ctx.restore();
+  ctx.save(); ctx.globalAlpha = alpha;
+  rr(x + 1, y + 1, w - 2, h - 2, r); ctx.lineWidth = 2.5; ctx.strokeStyle = `rgba(255,240,230,${0.28 + 0.25 * edge})`; ctx.stroke();
+  ctx.restore();
+}
+
+// ---------- 贯穿元素：木轮 ----------
+function wheel(cx, cy, R, ang, alpha, color = [246, 200, 140]) {
+  ctx.save(); ctx.globalAlpha = alpha; ctx.translate(cx, cy); ctx.rotate(ang);
+  ctx.strokeStyle = rgba(color, 0.95); ctx.lineCap = "round";
+  ctx.lineWidth = R * 0.13; ctx.beginPath(); ctx.arc(0, 0, R, 0, 6.283); ctx.stroke();
+  ctx.lineWidth = R * 0.05; ctx.beginPath(); ctx.arc(0, 0, R * 0.8, 0, 6.283); ctx.stroke();
+  ctx.lineWidth = R * 0.06;
+  for (let k = 0; k < 8; k++) { const a = k * Math.PI / 4; ctx.beginPath(); ctx.moveTo(Math.cos(a) * R * 0.16, Math.sin(a) * R * 0.16); ctx.lineTo(Math.cos(a) * R * 0.8, Math.sin(a) * R * 0.8); ctx.stroke(); }
+  ctx.fillStyle = rgba(color, 1); ctx.beginPath(); ctx.arc(0, 0, R * 0.17, 0, 6.283); ctx.fill();
+  ctx.restore();
+}
+function wheelSpeed(t) { const s = sectionAt(t).name; return s.includes("单车") ? 1.6 : s.includes("间奏") ? 0.9 : 0.35; }
+function wheelAngle(t) { let a = 0, step = 0.25; for (let x = 0; x < t; x += step) a += wheelSpeed(x) * Math.min(step, t - x); return a; }
+
+// ---------- 花字 ----------
+const KEYWORDS = ["惊鸿", "念念不忘", "眉目好看", "木生", "淑柔", "邂逅", "眼眸", "笑容", "溪水", "心头", "喜欢你", "甜蜜", "春风",
+  "香甜", "单车", "牵挂", "繁华", "害怕", "年华", "笑靥如花", "辙痕", "温存", "晨昏", "此生复何求", "木生遇淑柔"];
+function layoutLine(text) {
+  const clean = text.replace(/，/g, " ");
+  let rows = clean.split(/\s+/).filter(Boolean);
+  if (rows.length > 2) { const mid = Math.ceil(rows.length / 2); rows = [rows.slice(0, mid).join(""), rows.slice(mid).join("")]; }
+  if (rows.length === 1 && rows[0].length > 8) { const s = rows[0], m = Math.ceil(s.length / 2); rows = [s.slice(0, m), s.slice(m)]; }
+  const marks = [];
+  for (const seg of clean.split(/\s+/).filter(Boolean)) {   // 只在原句断开的每一小段里找关键词，不跨段
+    const m = new Array(seg.length).fill(false);
+    for (const k of KEYWORDS) { let i = seg.indexOf(k); while (i >= 0) { for (let j = i; j < i + k.length; j++) m[j] = true; i = seg.indexOf(k, i + 1); } }
+    marks.push(...m);
+  }
+  return { rows, marks };
+}
+function drawFlowerText(line, t, cy, scaleAll = 1) {
+  const { rows, marks } = layoutLine(line.text);
+  const n = marks.length, dur = line.end - line.t;
+  const stagger = Math.min(0.1, Math.max(0.04, (dur * 0.45) / n));
+  const exitK = easeSine((t - (line.end - 0.1)) / 0.6);
+  const beat = pulse(TL.hits, t, 0.22);
+  let idx = 0;
+  rows.forEach((row, ri) => {
+    const chars = [...row];
+    let sizes = chars.map((_, j) => (marks[idx + j] ? 128 : 100) * scaleAll);
+    let gap = 6 * scaleAll, total = sizes.reduce((a, b) => a + b, 0) + gap * (chars.length - 1);
+    const maxW = 840 * scaleAll;                                         // 留出卡片内边距，太长就整行等比缩小
+    if (total > maxW) { const f = maxW / total; sizes = sizes.map(s => s * f); gap *= f; total = maxW; }
+    let x = W / 2 - total / 2;
+    const rowY = cy + (ri - (rows.length - 1) / 2) * 170 * scaleAll;
+    chars.forEach((ch, j) => {
+      const gi = idx + j, key = marks[gi], size = sizes[j];
+      const p = easeOut((t - (line.t - 0.2 + gi * stagger)) / 0.6);
+      if (p <= 0) { x += size + gap; return; }
+      const tilt = (hash(gi * 7 + line.t) - 0.5) * 0.12;
+      const lift = Math.sin(t * 2.2 + gi * 0.7) * 6 * scaleAll;            // 落定后轻轻浮动
+      const pop = key ? 1 + 0.06 * beat : 1;                               // 关键词跟鼓点轻跳
+      ctx.save();
+      ctx.globalAlpha = p * (1 - exitK);
+      ctx.translate(x + size / 2, rowY + 60 * (1 - p) - 70 * exitK + lift);
+      ctx.rotate(tilt * (1 + 1.5 * (1 - p)));
+      ctx.scale((0.82 + 0.18 * p) * pop, (0.82 + 0.18 * p) * pop);
+      ctx.font = `900 ${size}px ${FONT}`; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+      ctx.lineJoin = "round";
+      ctx.shadowColor = "rgba(60,16,30,0.55)"; ctx.shadowBlur = 22; ctx.shadowOffsetY = 8;
+      ctx.lineWidth = size * 0.2; ctx.strokeStyle = key ? "#fff4e8" : "rgba(255,248,240,0.96)"; ctx.strokeText(ch, 0, 0);
+      ctx.shadowColor = "transparent";
+      const g = ctx.createLinearGradient(0, -size / 2, 0, size / 2);
+      if (key) { g.addColorStop(0, "#ff8fa3"); g.addColorStop(1, "#c2456e"); } else { g.addColorStop(0, "#ffd08a"); g.addColorStop(1, "#f08a5d"); }
+      ctx.fillStyle = g; ctx.fillText(ch, 0, 0);
+      ctx.restore();
+      x += size + gap;
+    });
+    idx += chars.length;
+  });
+}
+
+// ---------- 场景元素 ----------
+function decorCards(t, pal) {
+  const s = sectionAt(t).name;
+  // 远层：慢，淡
+  for (let i = 0; i < 3; i++) {
+    const x = 80 + i * 330 + 40 * Math.sin(t * 0.25 + i), y = 260 + 80 * i + 60 * Math.sin(t * 0.18 + i * 2);
+    glass(x, y, 220, 140, { r: 36, alpha: 0.32 });
+  }
+  // 中层：木轮卡片，动得比远层快
+  const wy = 1580 + 30 * Math.sin(t * 0.5);
+  if (!s.includes("间奏")) {
+    glass(760, wy - 120, 240, 240, { r: 56, alpha: 0.85 });
+    wheel(880, wy, 78, wheelAngle(t), 0.9);
+  }
+}
+function titleCard(t, a, sub = "badboy2026") {
+  if (a <= 0) return;
+  const y = 760 - 40 * (1 - a);
+  glass(140, y, 800, 420, { alpha: a, edge: 0.3 });
+  ctx.save(); ctx.globalAlpha = a; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  wheel(W / 2, y + 120, 48, wheelAngle(t), 1);
+  ctx.fillStyle = "#fff6ee"; ctx.font = `700 120px ${FONT}`; ctx.fillText("人生幸事", W / 2, y + 255);
+  ctx.fillStyle = "rgba(255,230,215,0.75)"; ctx.font = `400 40px ${FONT}`; ctx.fillText(sub, W / 2, y + 355);
+  ctx.restore();
+}
+function nameTags(t) {
+  const tags = [["木生", LINES[4]], ["淑柔", LINES[5]]];
+  tags.forEach(([name, line], i) => {
+    const a = easeSine((t - line.t) / 0.7) * (1 - easeSine((t - LINES[7].end) / 0.8));
+    if (a <= 0) return;
+    const x = i ? 600 : 140, y = 520 - 30 * (1 - a) + 12 * Math.sin(t * 0.8 + i);
+    glass(x, y, 340, 150, { r: 40, alpha: a });
+    ctx.save(); ctx.globalAlpha = a; ctx.textAlign = "center"; ctx.textBaseline = "middle";
+    ctx.fillStyle = "rgba(255,230,215,0.7)"; ctx.font = `400 30px ${FONT}`; ctx.fillText(i ? "她叫" : "他叫", x + 170, y + 45);
+    ctx.fillStyle = "#fff4ea"; ctx.font = `800 64px ${FONT}`; ctx.fillText(name, x + 170, y + 100);
+    ctx.restore();
+  });
+}
+function ripples(t, line) {
+  const a = easeSine((t - line.t) / 0.6) * (1 - easeSine((t - line.end) / 0.8));
+  if (a <= 0) return;
+  ctx.save();
+  for (let k = 0; k < 4; k++) {
+    const ph = ((t - line.t) / 3 + k / 4) % 1;
+    ctx.globalAlpha = a * (1 - ph) * 0.7;
+    ctx.strokeStyle = "#ffe2cc"; ctx.lineWidth = 3;
+    ctx.beginPath(); ctx.ellipse(W / 2, 1460, 120 + ph * 380, 30 + ph * 95, 0, 0, 6.283); ctx.stroke();
+  }
+  ctx.restore();
+}
+function stars(t, a) {
+  if (a <= 0) return;
+  for (let i = 0; i < 40; i++) {
+    const x = hash(i + 50) * W, y = hash(i + 80) * 900;
+    const tw = 0.4 + 0.6 * (0.5 + 0.5 * Math.sin(t * 1.3 + i));
+    ctx.fillStyle = `rgba(255,236,220,${0.7 * a * tw})`;
+    ctx.beginPath(); ctx.arc(x, y, 2 + 2 * hash(i), 0, 6.283); ctx.fill();
+  }
+}
+function highlightSweep(t, start, cards) {
+  const p = (t - start) / 1.6;
+  if (p <= 0 || p >= 1) return;
+  const k = easeSine(p), bx = lerp(-600, W + 600, k);
+  ctx.save();
+  ctx.beginPath(); cards.forEach(([x, y, w, h]) => ctx.roundRect(x, y, w, h, 52)); ctx.clip();
+  const g = ctx.createLinearGradient(bx - 220, 0, bx + 220, 0);
+  g.addColorStop(0, "rgba(255,255,255,0)"); g.addColorStop(0.5, "rgba(255,250,240,0.55)"); g.addColorStop(1, "rgba(255,255,255,0)");
+  ctx.translate(W / 2, H / 2); ctx.rotate(-0.35); ctx.translate(-W / 2, -H / 2);
+  ctx.fillStyle = g; ctx.fillRect(-400, -400, W + 800, H + 800);
+  ctx.restore();
+}
+
+// ---------- 主渲染：给定时间画出那一帧（导出也用它） ----------
+function renderAt(t) {
+  const pal = palette(t), sec = sectionAt(t).name;
+  const glow = 0.85 + 0.15 * pulse(TL.bars, t, 0.6) + (sec.includes("副歌") ? 0.12 : 0);
+  drawBackground(t, pal, glow);
+  stars(t, easeSine((t - 127.4) / 2) * (1 - easeSine((t - 140.8) / 2)));
+  decorCards(t, pal);
+
+  const first = LINES[0].t;
+  titleCard(t, easeSine(t / 1.6) * (1 - easeSine((t - (first - 1.2)) / 0.9)));
+  const cur = LINES.filter(l => l.t - 0.3 <= t && t < l.end + 0.7);
+  const singing = cur.length > 0;
+
+  // 歌词卡（近层）：唱歌时出现，间奏时退场
+  const cardA = clamp(Math.max(...LINES.map(l => easeSine((t - (l.t - 0.6)) / 0.7) * (1 - easeSine((t - (l.end + 0.2)) / 0.7)))));
+  const cardY = 980 + 22 * Math.sin(t * 0.7);
+  const beatEdge = pulse(TL.bars, t, 0.5);
+  if (cardA > 0) glass(70, cardY, 940, 470, { alpha: cardA, edge: beatEdge });
+
+  if (sec.includes("相遇")) nameTags(t);
+  const creek = LINES.find(l => l.text.includes("溪水")); if (creek) ripples(t, creek);
+
+  if (sec.includes("间奏")) {                                  // 间奏：大木轮卡片
+    const a = easeSine((t - 71.6) / 1.2) * (1 - easeSine((t - 90.6) / 1.0));
+    glass(240, 760 - 30 * (1 - a), 600, 600, { alpha: a, edge: beatEdge });
+    wheel(W / 2, 1060 - 30 * (1 - a), 200, wheelAngle(t), a);
+  }
+  for (const l of cur) drawFlowerText(l, t, cardY + 235);
+
+  const chorus2 = LINES.find(l => l.t > 140);
+  if (chorus2) highlightSweep(t, chorus2.t, [[70, cardY, 940, 470], [760, 1460, 240, 240]]);
+
+  if (t > 186) titleCard(t, easeSine((t - 186) / 1.5) * (1 - easeSine((t - (TL.duration - 2.2)) / 2)), "木生 × 淑柔");
+
+  // 进度条
+  ctx.fillStyle = "rgba(255,255,255,0.12)"; ctx.fillRect(80, 1840, 920, 6);
+  ctx.fillStyle = rgba(pal[0], 0.9); ctx.fillRect(80, 1840, 920 * t / TL.duration, 6);
+  ctx.fillStyle = "rgba(255,235,220,0.55)"; ctx.font = `400 30px ${FONT}`; ctx.textAlign = "left"; ctx.fillText("人生幸事 · badboy2026", 80, 110);
+}
+window.renderAt = renderAt;
+
+// ---------- 预览控制 ----------
+const audio = document.getElementById("audio"), seek = document.getElementById("seek"), play = document.getElementById("play");
+const sceneSel = document.getElementById("scene"), timeEl = document.getElementById("time");
+TL.sections.forEach(s => { const o = document.createElement("option"); o.value = s.t; o.textContent = s.name; sceneSel.appendChild(o); });
+const fmt = t => `${Math.floor(t / 60)}:${(t % 60).toFixed(1).padStart(4, "0")}`;
+const params = new URLSearchParams(location.search);
+if (params.has("export")) document.body.classList.add("export");
+let manualT = parseFloat(params.get("t") || "0");
+function frame() {
+  const t = audio.paused ? manualT : audio.currentTime;
+  renderAt(t);
+  timeEl.textContent = fmt(t);
+  if (!audio.paused) seek.value = Math.round(1000 * t / TL.duration);
+  if (!params.has("export")) requestAnimationFrame(frame);
+}
+play.onclick = () => { if (audio.paused) { audio.currentTime = manualT; audio.play(); play.textContent = "暂停"; } else { audio.pause(); manualT = audio.currentTime; play.textContent = "播放"; } };
+seek.oninput = () => { manualT = TL.duration * seek.value / 1000; audio.currentTime = manualT; };
+sceneSel.onchange = () => { manualT = parseFloat(sceneSel.value); audio.currentTime = manualT; seek.value = Math.round(1000 * manualT / TL.duration); };
+document.fonts.ready.then(() => { if (params.has("export")) renderAt(manualT); else frame(); });
+</script>
+</body>
+</html>
